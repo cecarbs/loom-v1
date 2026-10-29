@@ -49,6 +49,23 @@ class LocalProcess:
             os.killpg(self.pid, signal.SIGKILL)
 
 
+async def spawn_local(
+    argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], stdin: bool
+) -> LocalProcess:
+    """Start a host process that leads its own session / process group."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=cwd,
+        env=dict(env),
+        stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # terminal Ctrl+C reaches only loom
+        limit=STREAM_LIMIT,
+    )
+    return LocalProcess(proc)
+
+
 class NoneBackend:
     name = "none"
     python = sys.executable
@@ -66,17 +83,7 @@ class NoneBackend:
         purpose: Purpose,
         workspace_writable: bool = True,
     ) -> LocalProcess:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            env=dict(env),
-            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # terminal Ctrl+C reaches only loom
-            limit=STREAM_LIMIT,
-        )
-        return LocalProcess(proc)
+        return await spawn_local(argv, cwd=cwd, env=env, stdin=stdin)
 
     async def stop(self) -> None:
         pass

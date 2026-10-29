@@ -1,0 +1,40 @@
+;; loom seatbelt profile (docs/05 "seatbelt"). Rendered by loom.sandbox.seatbelt and passed
+;; inline with `sandbox-exec -p`, never as a file the sandbox could rewrite.
+;; In SBPL the last matching rule wins: broad allows first, then denies, then carve-outs.
+(version 1)
+(deny default)
+
+;; Processes, signals within the sandbox, and the system services Python and CLIs need.
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow mach-lookup)
+(allow ipc-posix-shm* ipc-posix-sem*)
+(allow file-ioctl)
+(allow pseudo-tty)
+
+;; Reads: broad (system libraries, toolchains), except the denylist.
+(allow file-read*)
+(deny file-read*
+{deny_read})
+
+;; Carve-outs inside the denylist: the kernel venv, this session's sandbox and spill dirs.
+(allow file-read*
+  (subpath (param "VENV"))
+  (subpath (param "SANDBOX_DIR"))
+  (subpath (param "OUT_DIR")))
+;; Directory entries on the way to them may be stat'ed (not listed).
+{ancestors}
+
+;; Writes: this session's sandbox dir, the workspace (unless read-only), and device nodes.
+(allow file-write*
+  (subpath (param "SANDBOX_DIR"))
+{workspace_write}
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper")
+  (regex #"^/dev/fd/"))
+
+;; No network at all: tools reach the outside world only through the broker.
+(deny network*)

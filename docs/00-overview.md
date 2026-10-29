@@ -43,7 +43,7 @@ A minimal terminal agent harness (in the spirit of Pi and Claude Code) that runs
 | Providers | Multi-provider: Anthropic, OpenAI-compatible (any `base_url`, incl. local servers) and OpenAI Responses adapters; per-model capability flags; extensions can add providers |
 | UI | Inline scrolling: `prompt_toolkit` for input, `rich` for output. Textual later. |
 | OS | macOS only for v1 |
-| Sandbox | Pluggable backends: `none` (dev only), `seatbelt` (default), `docker` (strict) |
+| Sandbox | Pluggable backends: `none` (dev only), `seatbelt` (macOS `sandbox-exec`, no dependencies), `docker` (**default**, strongest isolation; decided at M5). If Docker isn't running, loom refuses to start with a hint (start Docker, or pass `--sandbox seatbelt`) rather than silently falling back to a weaker sandbox. |
 | Scope | Full design documented; built in milestones (`10-roadmap.md`) |
 | Name | `loom` (package `loom`, CLI `loom`, data dir `~/.loom`) |
 | Default model | Anthropic `claude-sonnet-5-5` (built-in profile, alias `sonnet`) |
@@ -54,8 +54,7 @@ A minimal terminal agent harness (in the spirit of Pi and Claude Code) that runs
 
 ## Open questions (Claude Code: ask the owner when you reach the relevant milestone)
 
-1. Default sandbox (M5): `seatbelt` (fast, no dependencies) vs `docker` (stronger isolation). Docs assume `seatbelt`.
-2. Whether to read Claude Code skills from `~/.claude/skills` for compatibility (default: off, opt-in) (M8).
-3. Default model for non-Anthropic providers (M7).
+1. Whether to read Claude Code skills from `~/.claude/skills` for compatibility (default: off, opt-in) (M8).
+2. Default model for non-Anthropic providers (M7).
 
-Resolved: product name (`loom`), default Anthropic model (`claude-sonnet-5-5`); see Decisions.
+Resolved: product name (`loom`), default Anthropic model (`claude-sonnet-5-5`), first tool packages (M4), default sandbox `docker` (M5); see Decisions.

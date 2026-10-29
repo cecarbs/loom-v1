@@ -1,5 +1,25 @@
 # Changelog
 
+## M5 — Sandboxes
+
+- Decision (owner): **`docker` is the default backend**. If Docker isn't running or the image
+  is missing, loom exits with a fix-it message; it never falls back to a weaker sandbox.
+- `docker` backend: container per session (created on first use), `--network none`,
+  `--cap-drop ALL`, no-new-privileges, pids/memory/cpu limits, read-only root, same-path
+  mounts (workspace `ro` in read-only mode, recreated on switch), labelled stale-container
+  cleanup, in-container signals/kills through pid files, `LANG=C.UTF-8`. Image from
+  `src/loom/sandbox/Dockerfile`.
+- `seatbelt` backend: `sandbox-exec` with an inline profile (never a file the sandbox could
+  rewrite), shared sensitive-path denylist, `~/.loom` denied with carve-outs for the venv and
+  this session's `sandbox/` and `out/`, no network.
+- `loom sandbox setup [--docker]`; `create_backend(SandboxConfig)`; toolbar shows backend
+  `none` as a red "NO SANDBOX" badge.
+- Tests (`@macos` / `@docker`, both run here): network blocked, `~/.ssh` and other sessions
+  unreadable, writes only in the workspace (none in read-only mode), `session.jsonl` not
+  writable, broker tools and kernel inventory across calls, Ctrl+C / timeouts / cancel
+  reaching processes inside the sandbox, container recreate, stale cleanup, startup errors.
+  Unit tests run on `none` via a conftest fixture since the built-in default is docker.
+
 ## M4 — Broker, tool packages, approvals, secrets
 
 - `loom.broker.registry`: `ToolPackage`, `@package.tool(effect=…)`, `@package.client(name)`,

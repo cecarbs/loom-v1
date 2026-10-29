@@ -30,7 +30,7 @@ class SandboxProcess(Protocol):
 
 Note on `wait()`: asyncio's `Process.wait()` also waits for the pipes to close, which never happens while a background child (`sleep 100 &`) still holds them; backends must return when the process itself exits.
 
-Until M5, `create_backend` only knows `none`; asking for `seatbelt`/`docker` is a startup error (exit 2).
+`create_backend(cfg)` picks the backend; availability (daemon, image, venv) is checked in `start()`, and a `SandboxUnavailable` there ends `loom` with exit code 2 and a message saying how to fix it.
 
 Every backend starts processes in a **new session / process group** (`start_new_session=True`), so terminal Ctrl+C is delivered only to loom, and `kill()` can take down the whole group.
 
@@ -43,26 +43,30 @@ Every backend starts processes in a **new session / process group** (`start_new_
 | Backend | Isolation | Network | Startup | Use for |
 |---|---|---|---|---|
 | `none` | none | host | instant | Development of loom itself only. Prints a red warning in the footer. |
-| `seatbelt` (default) | macOS `sandbox-exec` profile | denied | ~instant | Daily use on your own repos |
-| `docker` | container (Docker Desktop, OrbStack, or Colima) | `none` by default | 1–2 s per session | Untrusted data or code, stronger isolation |
+| `seatbelt` | macOS `sandbox-exec` profile | denied | ~instant | When Docker isn't available; fast daily use on your own repos |
+| `docker` (default) | container (Docker Desktop, OrbStack, or Colima) | `none` by default | 1–2 s per session | Everything by default: strongest isolation, also for untrusted data or code |
+
+With the default `docker` backend, loom checks at startup that the daemon answers and the image exists. If not, it exits with a message saying how to fix it (`start Docker Desktop`, `loom sandbox setup --docker`) or to choose `--sandbox seatbelt` explicitly. It never falls back to a weaker backend on its own.
 
 ### `seatbelt`
 
-Runs processes with `sandbox-exec -f <profile> -D WORKSPACE=… -D SESSION_DIR=… -D HOME_DIR=… …`. `sandbox-exec` is deprecated by Apple but still shipped and used by other coding agents; isolate it behind this backend so it can be replaced.
+Runs processes with `sandbox-exec -p <profile> -D VENV=… -D SANDBOX_DIR=… -D OUT_DIR=… <argv>`. The profile is passed **inline**, never as a file: a profile file inside the session's writable sandbox dir could be rewritten by sandboxed code to loosen the next spawn. Paths are resolved before rendering (seatbelt matches real paths, `/private/var` not `/var`). `sandbox-exec` execs the command, so pid and process group are those of the command itself. `sandbox-exec` is deprecated by Apple but still shipped and used by other coding agents; isolate it behind this backend so it can be replaced.
 
 Profile template (`seatbelt.sb.tmpl`) policy:
 
 - `(deny default)`, then allow process exec/fork, sysctl reads, mach lookups needed by Python and common CLI tools.
 - **Reads:** allowed broadly (system libraries, toolchains), **except** a denylist: `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/Library/Keychains`, browser profile dirs, `~/.loom` (other sessions, config, history) with carve-outs for `~/.loom/sandbox-venv`, the current `<session_dir>/sandbox/` and `<session_dir>/out/`, and any `[sandbox] deny_read` paths.
+- Rule order matters: in SBPL the last matching rule wins, so the profile is broad allows → denylist → carve-outs. Directories on the way to the carve-outs (`~/.loom`, `~/.loom/sessions/<project>`, …) get `file-read-metadata` only (stat, not list). That rule is never rendered empty: `(allow file-read-metadata)` with no filter would allow everything.
+- setuid binaries (e.g. `/bin/ps`) can't be exec'd inside the sandbox.
 - **Writes:** only the workspace (omitted when `workspace_writable=False`) and `<session_dir>/sandbox/`.
 - **Network:** denied entirely (`(deny network*)`). The kernel needs no network: tools go through the broker over stdio.
 - Optional (M9+): `network = "allowlist"` mode, implemented by allowing outbound only to a local filtering proxy on 127.0.0.1 and setting `HTTPS_PROXY` for sandboxed processes.
 
-Kernel Python for seatbelt: a dedicated venv at `~/.loom/sandbox-venv`, created by `loom sandbox setup` (uses `uv venv` and installs `[sandbox] python_packages`, default `pandas numpy pyarrow`). The runner file is copied into the session dir at kernel start.
+Kernel Python for seatbelt: a dedicated venv at `~/.loom/sandbox-venv`, created by `loom sandbox setup` (`uv venv --python 3.12`, then `uv pip install` of `[sandbox] python_packages`, default `pandas numpy pyarrow`; falls back to `python -m venv` + pip without uv). If it's missing, `start()` says to run `loom sandbox setup`. The runner file is copied into the session dir at kernel start.
 
 ### `docker`
 
-One container per session, created at `start()`:
+One container per session. `start()` checks the CLI, the daemon and the image, and removes stale containers; the container itself is created on the first spawn, with the workspace mount matching that spawn's `workspace_writable` (so starting in read-only mode doesn't create a container twice):
 
 ```
 docker run -d --name loom-<session> --init
@@ -79,10 +83,12 @@ docker run -d --name loom-<session> --init
   loom-sandbox:<version> sleep infinity
 ```
 
-- `spawn()` uses `docker exec -i` via the CLI (`asyncio.create_subprocess_exec`); no Docker Python SDK.
-- The kernel runner is spawned with `docker exec -i … python <session_dir>/sandbox/runner.py`. Interrupt = `docker exec <ctr> sh -c 'kill -INT <pid>'` (the runner reports its in-container pid in `ready`; slim images have no standalone `kill` binary, so use the shell builtin).
+- Also on the container: labels `loom.sandbox=1`, `loom.host_pid=<loom's pid>`, `loom.session=<id>`. "Stale" = a `loom.sandbox` container whose `loom.host_pid` is no longer alive, so concurrent loom instances don't remove each other's containers.
+- `spawn()` uses `docker exec [-i] -w <cwd> -e … <ctr> sh -c 'echo $$ > "$0"; exec "$@"' <pidfile> <argv…>` via the CLI (`asyncio.create_subprocess_exec`); no Docker Python SDK. The docker CLI process runs with the host environment (contexts, `DOCKER_HOST`); the container process gets the allowlisted env without `PATH` (the image's own) and with `LANG=C.UTF-8` (the host locale usually isn't installed in the image).
+- Killing the host `docker exec` does **not** stop the process inside the container. So each exec'd process writes its in-container pid to `<session_dir>/sandbox/pids/<token>`, and `send_signal`/`kill` run `docker exec <ctr> sh -c 'kill -<sig> <pid>'` / `kill -9 -- -<pid>` (exec'd processes lead their own session and process group in the container, so the group kill takes their children too).
+- The kernel runner is spawned with `docker exec -i … python -I <session_dir>/sandbox/runner.py`; interrupts reach it through the pid file as above.
 - `workspace_writable` is fixed per container; switching into/out of read-only mode recreates the container (kernel restart).
-- Image built from `sandbox/Dockerfile` by `loom sandbox setup --docker`: `python:3.12-slim` + `[sandbox] python_packages` + common CLIs (`git`, `ripgrep`, `jq`, `curl`).
+- Image built from `sandbox/Dockerfile` by `loom sandbox setup --docker`: `python:3.12-slim` + `[sandbox] python_packages` + common CLIs (`git`, `ripgrep`, `jq`, `curl`, `procps`).
 - Mounting the workspace at the **same absolute path** means paths in tool output match host paths, so `read`/`edit` work on them directly.
 - Container removed in `stop()` and on startup cleanup of stale `loom-*` containers.
 

@@ -56,7 +56,7 @@ def build_agent(
     profile = resolve_profile(model or config.default_model, config)
     secrets = secrets or SecretStore()
     provider = provider or create_provider(profile, secrets)
-    backend = backend or create_backend(config.sandbox.backend)
+    backend = backend or create_backend(config.sandbox, loom_home=home)
     if packages is None:
         packages, _ = discover_packages()
 
@@ -173,7 +173,7 @@ class App:
         else:
             self.notices = []
         self.packages = list(packages)
-        self.backend = create_backend(config.sandbox.backend)
+        self.backend = create_backend(config.sandbox, loom_home=home)
         self.agent = self._build(config.default_model)
 
     def _build(self, alias: str) -> AgentLoop:

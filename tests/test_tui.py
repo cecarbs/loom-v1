@@ -167,7 +167,11 @@ async def test_renderer_tracks_kernel_status(tmp_path: Path) -> None:
     app = make_app(tmp_path, [])
     ui = InlineUI(app, console=console(), source=Lines(), approver=Approve())
     await app.bus.emit(ev.KernelStatus("idle", 2))
-    assert ui.toolbar() == " sonnet · ctx 0% · $0.0000 · none · ask · kernel idle (2 vars)"
+    fragments = ui.toolbar()
+    assert "".join(f[1] for f in fragments) == (
+        " sonnet · ctx 0% · $0.0000 ·  none: NO SANDBOX  · ask · kernel idle (2 vars)"
+    )
+    assert ("bg:ansired fg:ansiwhite bold", " none: NO SANDBOX ") in fragments
 
 
 # --- approvals --------------------------------------------------------------------
@@ -381,7 +385,8 @@ async def test_tools_and_mode_commands(tmp_path: Path) -> None:
     _, out = await _command(app, "/mode read-only")
     assert app.mode == "read-only" and not app.agent.tool_ctx.workspace_writable
     assert any(r["kind"] == "mode_change" for r in app.agent.log.read())
-    assert "read-only" in InlineUI(app, console=console(), source=Lines()).toolbar()
+    toolbar = InlineUI(app, console=console(), source=Lines()).toolbar()
+    assert "read-only" in "".join(f[1] for f in toolbar)
     _, out = await _command(app, "/mode nope")
     assert "Unknown mode 'nope'" in out and app.mode == "read-only"
     await app.new_session()  # the mode carries over to new sessions

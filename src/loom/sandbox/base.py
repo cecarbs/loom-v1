@@ -8,7 +8,10 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from loom.config import SandboxConfig
 
 Purpose = Literal["bash", "kernel"]
 
@@ -97,11 +100,21 @@ def sandbox_env(
     return env
 
 
-def create_backend(name: str) -> SandboxBackend:
-    if name == "none":
-        from loom.sandbox.none import NoneBackend
+def create_backend(cfg: SandboxConfig, *, loom_home: Path | None = None) -> SandboxBackend:
+    """The configured backend. Availability (daemon, venv, image) is checked in start()."""
+    from loom.session.store import loom_home as default_loom_home
 
-        return NoneBackend()
-    raise SandboxUnavailable(
-        f"sandbox backend {name!r} is not implemented yet (arrives in M5); use --sandbox none"
-    )
+    loom_home = loom_home or default_loom_home()
+    match cfg.backend:
+        case "none":
+            from loom.sandbox.none import NoneBackend
+
+            return NoneBackend()
+        case "seatbelt":
+            from loom.sandbox.seatbelt import SeatbeltBackend
+
+            return SeatbeltBackend(loom_home=loom_home, deny_read=cfg.deny_read)
+        case "docker":
+            from loom.sandbox.docker import DockerBackend
+
+            return DockerBackend(cfg, loom_home=loom_home)

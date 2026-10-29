@@ -34,6 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("name")
     secrets_cmd.add_parser("list", help="list secret names (never values)")
 
+    sandbox = commands.add_parser("sandbox", help="prepare sandbox backends")
+    sandbox_cmd = sandbox.add_subparsers(dest="action", required=True)
+    setup = sandbox_cmd.add_parser(
+        "setup", help="create the seatbelt kernel venv (or, with --docker, build the image)"
+    )
+    setup.add_argument("--docker", action="store_true", help="build the docker sandbox image")
+
     tools = commands.add_parser("tools", help="kernel tool packages")
     tools_cmd = tools.add_subparsers(dest="action", required=True)
     tools_cmd.add_parser("list", help="show the tool catalog")
@@ -65,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for notice in loaded.notices:
         print(f"loom: {notice}", file=sys.stderr)
+    if args.command == "sandbox":
+        from loom.sandbox.setup import setup_docker, setup_seatbelt
+
+        if args.docker:
+            return setup_docker(loaded.config.sandbox)
+        return setup_seatbelt(loaded.config.sandbox, loom_home())
     try:
         asyncio.run(_interactive(loaded.config))
     except SandboxUnavailable as e:

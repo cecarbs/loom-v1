@@ -62,7 +62,7 @@ Acceptance: in the kernel, `rows = demo.search_logs(...)` returns 10k rows while
 Docs: 05.
 - `seatbelt` backend with the profile template; `loom sandbox setup` creates `~/.loom/sandbox-venv`.
 - `docker` backend (container per session, same-path mounts, limits, `--network none`, cleanup of stale containers, `loom sandbox setup --docker`).
-- Default backend → `seatbelt`; footer shows the backend; red warning on `none`.
+- Default backend → `docker` (owner decision at M5); startup check with a clear error when Docker isn't running or the image is missing (no silent fallback); footer shows the backend; red warning on `none`.
 
 Acceptance (`@macos` / `@docker` tests): from `execute` and `bash`, network access fails; reading `~/.ssh` fails; writing outside the workspace fails; writing inside the workspace works (and fails in `read-only` mode); writing `session.jsonl` fails; reading other sessions under `~/.loom/sessions` fails; tool calls through the broker still work; the kernel inventory survives across calls in both backends.
 

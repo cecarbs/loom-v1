@@ -24,7 +24,7 @@ I'll pull the error counts by host around 02:00.
 web-3 accounts for 92% of the 500s, all on /checkout …
 
  > _
- sonnet · ctx 18% · $0.04 · seatbelt · ask · kernel idle (3 vars)
+ sonnet · ctx 18% · $0.04 · docker · ask · kernel idle (3 vars)
 ```
 
 ## Input (`tui/input.py`)

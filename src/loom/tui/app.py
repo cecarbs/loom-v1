@@ -10,6 +10,7 @@ import termios
 from collections.abc import Coroutine, Iterator
 from typing import Any, TextIO
 
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -50,14 +51,24 @@ class InlineUI:
             )
         self.source = source
 
-    def toolbar(self) -> str:
-        return " " + status_line(
+    def toolbar(self) -> StyleAndTextTuples:
+        """The status line; backend `none` (no isolation at all) is shown in red."""
+        backend = self.app.backend.describe()
+        line = " " + status_line(
             self.renderer.status,
             self.app.profile.alias,
-            self.app.backend.describe(),
+            backend,
             self.app.mode,
             self.renderer.status.kernel(),
         )
+        if backend != "none":
+            return [("", line)]
+        before, _, after = line.partition(" · none · ")
+        return [
+            ("", before + " · "),
+            ("bg:ansired fg:ansiwhite bold", " none: NO SANDBOX "),
+            ("", " · " + after),
+        ]
 
     async def run(self) -> None:
         profile = self.app.profile

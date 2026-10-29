@@ -91,7 +91,7 @@ eager = false
 default_timeout_s = 300
 
 [sandbox]
-backend = "seatbelt"               # none | seatbelt | docker (built-in default is "none" until M5)
+backend = "docker"                 # none | seatbelt | docker (default; needs a running Docker daemon)
 network = "none"                   # none | allowlist (later)
 allowlist = []                     # hosts, for allowlist mode
 deny_read = []                     # extra paths

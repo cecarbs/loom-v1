@@ -163,8 +163,7 @@ class DockerConfig(_Model):
 
 
 class SandboxConfig(_Model):
-    # M0-M4 run without a sandbox; M5 switches the default to "seatbelt".
-    backend: SandboxBackendName = "none"
+    backend: SandboxBackendName = "docker"  # owner decision at M5 (docs/00)
     network: NetworkMode = "none"
     allowlist: list[str] = Field(default_factory=list)
     deny_read: list[str] = Field(default_factory=list)
