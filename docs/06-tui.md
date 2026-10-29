@@ -2,7 +2,9 @@
 
 The UI runs **inline**: output goes to normal terminal scrollback (copy/paste and search work like any CLI), and an input prompt sits at the bottom. No full-screen takeover. Libraries: `prompt_toolkit` for input, `rich` for rendering.
 
-The TUI only talks to the core through the event bus (`AgentEvent`s) and a small command API (`submit`, `cancel`, `respond`, slash-command handlers). It must not reach into core internals.
+The TUI only talks to the core through the event bus (`AgentEvent`s) and a small command API, `loom.app.App`: `submit(text)` (runs a turn; the UI cancels it by cancelling that task), `switch_model(alias)`, `new_session()`, plus `bus.respond(...)` for approvals and read-only state (`profile`, `agent.usage`, `agent.cost_usd`). `loom.app` is shared by every UI and, like the core, never imports `loom.tui`. Slash-command handlers get a `CommandContext` (app, console, renderer, registry).
+
+When stdin is not a terminal (piped input, scripts), the same renderer runs on a plain console without Live regions, input is read line by line, and approval requests resolve as deny.
 
 ## Screen anatomy
 
@@ -28,9 +30,12 @@ web-3 accounts for 92% of the 500s, all on /checkout …
 ## Input (`tui/input.py`)
 
 - `prompt_toolkit.PromptSession` with `prompt_async()`, persistent history at `~/.loom/history`.
-- **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline; pasted multi-line text is kept as-is (bracketed paste).
-- Completion: `/` slash commands, `@` file paths relative to the workspace (an `@path` mention attaches the file's contents to the message, subject to the read path policy).
-- `bottom_toolbar` renders the status line: model alias, context %, session cost (`—` if the model has no pricing), sandbox backend, approval mode, kernel state + variable count.
+- **Enter** submits; **Alt+Enter**, **Ctrl+J** or **Shift+Enter** (in terminals that report it, via xterm modifyOtherKeys or `CSI u` encodings, which loom registers with prompt_toolkit's parser; unknown modified keys like Shift+Esc are ignored instead of being inserted as text) inserts a newline; pasted multi-line text is kept as-is (bracketed paste).
+- Completion: `/` slash commands (at the start of the input), `@` file paths relative to the workspace (hidden entries only after a typed `.`; `.git`, `node_modules`, `.venv`, `__pycache__` skipped; never outside the workspace).
+- `@path` mentions (`@` at the start of the input or after whitespace, so `me@example.com` is not one) attach the file to the user message as a `<file path="…">` text block, rendered exactly like a `read` result (numbered lines, images as image blocks). Attachments go through the read path policy (sensitive or outside paths are not attached; a notice says why) and the output budget, and count as a read so the model can `edit` the file directly. Mentions that aren't existing files stay plain text.
+- A line is a slash command only if its first word is `/name` with no further `/`, so `/usr/bin/env is broken` is sent as a message.
+- `bottom_toolbar` renders the status line: model alias, context %, session cost (`—` if the model has no pricing), sandbox backend, approval mode, kernel state + variable count (kernel part from M3). prompt_toolkit only draws the toolbar once the terminal answers its cursor-position request, which every real terminal does. The toolbar sits on the window's bottom row, not directly under the prompt.
+- The prompt is erased on submit (`erase_when_done`) and the input is re-printed as the `you` panel.
 
 ## Rendering (`tui/render.py`)
 
@@ -46,9 +51,13 @@ Subscribes to the bus and renders with a single `rich.console.Console`:
 | `ApprovalRequested` | See below. |
 | `Compacted`, `Notice`, `ErrorEvent` | One-line dim/yellow/red notices. |
 
-**Terminal ownership rule (important pitfall):** prompt_toolkit and Rich `Live` must never draw at the same time. While a turn runs, the prompt is **not active**; the renderer owns the terminal. When the turn finishes, the renderer stops all Live regions, then the input loop calls `prompt_async()` again. Approval prompts temporarily stop Live, prompt, then resume. Wrap the app in `prompt_toolkit.patch_stdout()` only while the prompt is active.
+Live regions show only the last lines that fit on the screen (tool output: the last 12), because a region taller than the terminal can't be redrawn in place and leaves duplicates in scrollback. The full text is printed once when the region closes.
 
-Ctrl+C during a turn is caught via `loop.add_signal_handler(SIGINT, …)` and calls `app.cancel_turn()`. Sandboxed children run in their own process groups, so they never see the terminal's SIGINT directly.
+**Terminal ownership rule (important pitfall):** prompt_toolkit and Rich `Live` must never draw at the same time. While a turn runs, the prompt is **not active**; the renderer owns the terminal. When the turn finishes, the renderer stops all Live regions, then the input loop calls `prompt_async()` again. Approval prompts temporarily stop Live, prompt, then resume with a *new* `Live` (a restarted one remembers its old height and overwrites the lines the prompt printed). Wrap the app in `prompt_toolkit.patch_stdout()` only while the prompt is active.
+
+While a turn runs, terminal echo is off (`ECHO`/`ECHOCTL` cleared, `ISIG` kept): an echoed `^C` or typed key would land inside the Live region, shift the cursor, and make its erase miss a line (seen as a duplicated first line). Keys typed during the turn are flushed when it ends.
+
+Ctrl+C during a turn is caught via `loop.add_signal_handler(SIGINT, …)` and cancels the turn's task. Sandboxed children run in their own process groups, so they never see the terminal's SIGINT directly.
 
 Because the prompt is inactive during a turn, typing ahead/steering is not supported in v1.
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## M2 — Inline TUI
+
+- `loom.tui`: prompt_toolkit input (persistent history, Enter / Alt+Enter / Ctrl+J, `/` and `@`
+  completion, status toolbar, Ctrl+C clears input and twice quits, Ctrl+D quits); Rich renderer
+  driven only by bus events (streaming Markdown in a screen-height-capped Live region, collapsed
+  thinking, tool headers, previews and coloured diffs); single-key approval prompt; slash commands
+  `/help /model /cost /clear /thinking /exit` (`/thinking` added since it's display-only).
+- `loom.app.App` command API (`submit`, `switch_model`, `new_session`); `AgentLoop.switch_model`.
+- `@path` mentions attach files through the read policy and output budget (`loom.core.mentions`).
+- Events: `ApprovalRequested`, `Decision`, `EventBus.request_approval` / `respond`.
+- `model_request` log entries record the request settings (max_tokens, thinking, cache, counts).
+- Piped stdin still works (plain lines, no Live, approvals deny), for scripts and manual tests.
+- Fixes found while testing in a real terminal: an empty assistant reply (seen with qwen3:8b) is no
+  longer appended to history (it would break the next Anthropic request); resuming after an
+  approval prompt uses a fresh Live region (a restarted one overwrote the prompt's lines); terminal
+  echo is off during a turn (the echoed `^C` on cancel duplicated the first streamed line);
+  modified keys from Ghostty (`CSI 27;2;27~` for Shift+Esc) are parsed instead of shown as text,
+  and Shift/Ctrl/Alt+Enter insert a newline.
+- Tests: import-boundary test in a fresh interpreter, renderer, approvals and prompt driven through
+  prompt_toolkit pipe input, completion, commands, and a real SIGINT cancelling a FakeProvider turn.
+- Docs: removed "Sonnet 5.5 thinks adaptively anyway" from the config example; without a
+  `thinking` setting no thinking blocks came back in the M1 Sonnet runs.
+
 ## M1 — Core loop
 
 - Canonical messages, event bus, `AgentLoop` (retries with backoff, step limit, usage/cost

@@ -30,7 +30,7 @@ Append-only JSONL, written only by the host process (never writable from the san
 |---|---|
 | `session_start` | workspace, model, sandbox, mode, loom version |
 | `message` | a canonical `Message` (user/assistant) |
-| `model_request` | model, token counts, cache stats, latency, stop reason (no full prompt; it's reconstructible) |
+| `model_request` | model, settings (max_tokens, thinking, temperature, cache, tool and message counts), token counts, cache stats, latency, stop reason (no full prompt; it's reconstructible) |
 | `tool_call` / `tool_result` | name, args, result (full text or spill path), duration, is_error |
 | `kernel_exec` | execute id, **full code**, status, duration, output size |
 | `broker_call` | tool, args, effect, approval decision, duration, result size |

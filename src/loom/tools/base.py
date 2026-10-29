@@ -65,6 +65,10 @@ class ToolSet:
         self._log = session_log
         self._bus = bus
 
+    @property
+    def budget(self) -> OutputBudget:
+        return self._budget
+
     def names(self) -> list[str]:
         return list(self._tools)
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from loom.core.messages import Message
 
@@ -76,6 +77,28 @@ class ToolCallFinished:
 
 
 @dataclass(frozen=True)
+class ApprovalRequested:
+    """The only event that expects a reply: answer with `EventBus.respond(request_id, ...)`."""
+
+    request_id: str
+    tool: str
+    args_preview: str
+    effect: str  # "read" | "write" | ...
+    agent_id: str | None = None  # set for requests from sub-agents
+
+
+@dataclass(frozen=True)
+class Decision:
+    action: Literal["allow_once", "allow_session", "deny"]
+    message: str | None = None  # "deny with message": returned to the model as the error text
+    by: Literal["user", "policy", "override", "cancel"] = "user"
+
+    @property
+    def allowed(self) -> bool:
+        return self.action != "deny"
+
+
+@dataclass(frozen=True)
 class Notice:
     text: str
 
@@ -112,6 +135,7 @@ AgentEvent = (
     | ToolCallStarted
     | ToolCallOutput
     | ToolCallFinished
+    | ApprovalRequested
     | Notice
     | ErrorEvent
     | UsageUpdated
@@ -127,6 +151,7 @@ class EventBus:
 
     def __init__(self) -> None:
         self._subscribers: list[Subscriber] = []
+        self._pending: dict[str, asyncio.Future[Decision]] = {}
 
     def subscribe(self, handler: Subscriber) -> Callable[[], None]:
         self._subscribers.append(handler)
@@ -138,3 +163,18 @@ class EventBus:
                 await handler(event)
             except Exception:
                 log.exception("event subscriber failed on %s", type(event).__name__)
+
+    async def request_approval(self, event: ApprovalRequested) -> Decision:
+        """Emit `event` and wait for a `respond()`. Never resolves to allow on its own."""
+        future: asyncio.Future[Decision] = asyncio.get_running_loop().create_future()
+        self._pending[event.request_id] = future
+        try:
+            await self.emit(event)
+            return await future
+        finally:
+            self._pending.pop(event.request_id, None)
+
+    def respond(self, request_id: str, decision: Decision) -> None:
+        future = self._pending.get(request_id)
+        if future is not None and not future.done():
+            future.set_result(decision)

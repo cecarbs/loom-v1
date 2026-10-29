@@ -32,7 +32,7 @@ Acceptance: scripted FakeProvider test performs read → edit → final answer; 
 
 ## M2 — Inline TUI
 Docs: 06.
-- prompt_toolkit input (history, multiline, `/` and `@` completion), Rich renderer driven only by bus events, status toolbar, Ctrl+C semantics, approval prompt component (wired to a test event), slash command framework with `/help /model /cost /clear /exit`.
+- prompt_toolkit input (history, multiline, `/` and `@` completion), Rich renderer driven only by bus events, status toolbar, Ctrl+C semantics, approval prompt component (wired to a test event), slash command framework with `/help /model /cost /clear /thinking /exit`, `@path` attachments, `loom.app.App` command API. Removes the M1 `tui/basic.py`.
 
 Acceptance: no core module imports `loom.tui` (add a test that checks imports); streaming Markdown renders without flicker or interleaving with the prompt; Ctrl+C cancels a running FakeProvider turn and returns to the prompt.
 

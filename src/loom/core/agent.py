@@ -60,6 +60,19 @@ class AgentLoop:
         self._streaming: tuple[list[str], list[ToolUseBlock]] | None = None
         self._running: tuple[Sequence[ToolUseBlock], list[ToolResultBlock]] | None = None
 
+    def switch_model(self, profile: ModelProfile, provider: pv.Provider) -> None:
+        """Use another model from the next request on. History is kept; each adapter drops
+        what its API can't take (e.g. another provider's thinking blocks)."""
+        self.log.append(
+            "model_switch", old=self.profile.alias, new=profile.alias, provider=profile.provider
+        )
+        self.profile = profile
+        self.provider = provider
+        self.context.profile = profile
+        self.tool_ctx.model_accepts_images = profile.capabilities.images
+        if profile.pricing is not None and self.cost_usd is None:
+            self.cost_usd = 0.0  # requests to unpriced models aren't counted
+
     async def run_turn(self, user_input: str, attachments: Sequence[Block] = ()) -> None:
         try:
             self._append(Message("user", [TextBlock(user_input), *attachments]))
@@ -80,6 +93,11 @@ class AgentLoop:
             request = self.context.build_request(self.history, self.tools.schemas())
             message = await self._stream_model(request)
             if message is None:
+                return
+            if not message.content:
+                # Nothing to show or replay (an empty assistant message is also invalid for
+                # some APIs). Seen with small local models that only produce reasoning.
+                await self.bus.emit(ev.Notice("The model returned an empty response."))
                 return
             self._append(message)
             await self.bus.emit(ev.AssistantMessageDone(message))
@@ -137,6 +155,7 @@ class AgentLoop:
                 self.log.append(
                     "model_request",
                     model=request.model,
+                    settings=_settings(request),
                     usage=dataclasses.asdict(final.usage),
                     latency_ms=latency_ms,
                     stop_reason=final.stop_reason,
@@ -201,3 +220,18 @@ class AgentLoop:
         last = self.history[-1] if self.history else None
         if last is not None and last.role == "assistant" and last.tool_uses():
             self._append(Message("user", [interrupted_result(c.id) for c in last.tool_uses()]))
+
+
+def _settings(request: pv.ModelRequest) -> dict[str, object]:
+    """What was asked for, beyond the (reconstructible) prompt: makes the log checkable."""
+    thinking = request.thinking
+    return {
+        "max_tokens": request.max_tokens,
+        "thinking": {k: v for k, v in dataclasses.asdict(thinking).items() if v is not None}
+        if thinking
+        else None,
+        "temperature": request.temperature,
+        "cache": request.cache,
+        "tools": len(request.tools),
+        "messages": len(request.messages),
+    }

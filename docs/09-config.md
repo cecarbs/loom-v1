@@ -24,7 +24,7 @@ provider = "anthropic"
 model = "claude-sonnet-5-5"        # check provider docs for current IDs
 context_window = 1000000           # built-in; lower it to compact earlier and cap per-turn cost
 max_tokens = 64000
-thinking = { effort = "medium" }   # omit for the provider default (Sonnet 5.5 thinks adaptively anyway)
+thinking = { effort = "medium" }   # omit to send no thinking setting (no thinking blocks were seen without it)
 # pricing = { input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.50 }  # USD per MTok (built-in)
 
 [models.local]

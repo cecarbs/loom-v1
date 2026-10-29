@@ -54,10 +54,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _interactive(config: LoomConfig) -> None:
-    from loom.app import build_agent
-    from loom.core.events import EventBus
-    from loom.tui.basic import run_basic
+    from loom.app import App
+    from loom.tui.app import InlineUI
 
-    bus = EventBus()
-    agent = build_agent(Path.cwd().resolve(), config, bus)
-    await run_basic(agent, bus)
+    await InlineUI(App(Path.cwd().resolve(), config)).run()

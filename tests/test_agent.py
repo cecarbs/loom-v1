@@ -100,6 +100,8 @@ async def test_read_edit_final_answer(tmp_path: Path) -> None:
     kinds = h.log_kinds()
     assert kinds[0] == "session_start"
     assert kinds.count("model_request") == 3
+    first = next(r for r in h.agent.log.read() if r["kind"] == "model_request")
+    assert first["settings"]["max_tokens"] == 64_000 and first["settings"]["tools"] == 3
     assert kinds.count("tool_call") == kinds.count("tool_result") == 2
     assert kinds.count("message") == 6
     assert [type(e) for e in h.events][-1] is ev.TurnFinished
@@ -294,3 +296,13 @@ async def test_large_tool_result_is_budgeted(tmp_path: Path) -> None:
     spilled = h.agent.log.read()
     spill = next(r for r in spilled if r["kind"] == "tool_result")["spill_path"]
     assert Path(spill).read_text().count("\n") == 9_999
+
+
+async def test_empty_response_is_not_appended(tmp_path: Path) -> None:
+    h = Harness(tmp_path, [[], [TextBlock("second try")]])
+    await h.agent.run_turn("hi")
+    assert [m.role for m in h.agent.history] == ["user"]
+    assert any("empty response" in n.text for n in h.of(ev.Notice))
+    assert h.of(ev.TurnFinished)
+    await h.agent.run_turn("again")
+    assert h.agent.history[-1].text() == "second try"

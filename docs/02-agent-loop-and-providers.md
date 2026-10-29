@@ -191,14 +191,18 @@ A simple in-process pub/sub. Subscribers are async callables; the bus awaits the
 TurnStarted, TextDelta, ThinkingDelta, AssistantMessageDone,
 ToolCallStarted(id, name, input), ToolCallOutput(id, chunk),   # live streaming from bash/execute
 ToolCallFinished(id, result_preview, is_error, duration_ms),
-ApprovalRequested(request_id, tool, args_preview, effect),     # TUI must answer via bus.respond()
+ApprovalRequested(request_id, tool, args_preview, effect, agent_id=None),  # answer via bus.respond()
 KernelStatus(state: "starting"|"idle"|"busy"|"dead"),
 Compacted(before_tokens, after_tokens), Notice(text), ErrorEvent(text),
-UsageUpdated(input_tokens, output_tokens, cache_read, context_pct),
+UsageUpdated(input_tokens, output_tokens, cache_read, context_pct, cost_usd),  # cost: session total or None
 TurnCancelled, TurnFinished
 ```
 
-`ApprovalRequested` is the only event that expects a reply. It carries a `request_id`; the TUI calls `bus.respond(request_id, decision)`, which resolves an `asyncio.Future` the broker is awaiting.
+`ApprovalRequested` is the only event that expects a reply. The broker calls `await bus.request_approval(event)`, which emits the event and awaits an `asyncio.Future`; the TUI answers with `bus.respond(request_id, Decision(action, message=None, by="user"))`, `action` being `allow_once`, `allow_session` or `deny`. Nothing resolves the future on its own, so an unanswered request never allows; callers that need a deadline or a cancel-means-deny rule wrap the await.
+
+Other loop rules:
+- An assistant reply with no content (seen with small local models that only produce reasoning) is not appended to history; the loop emits a `Notice` and ends the turn.
+- `AgentLoop.switch_model(profile, provider)` (used by `/model`) keeps history; each adapter drops what its API can't take (e.g. another provider's thinking blocks). The system prompt is unchanged. Session cost counts only requests to models with pricing.
 
 ## System prompt (`core/prompts/system.md`)
 

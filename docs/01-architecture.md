@@ -134,6 +134,7 @@ loom/
       messages.py       # canonical message + block types
       events.py         # AgentEvent types, EventBus
       context.py        # system prompt assembly, context files, skills list
+      mentions.py       # @path attachments (read policy + output budget)
       compaction.py
       prompts/system.md
     providers/
@@ -173,7 +174,6 @@ loom/
     extensions/{api,loader}.py
     agents/subagent.py
     tui/{app,input,render,approvals,commands}.py
-    tui/basic.py        # temporary plain-print UI (M1), removed in M2
   packages/
     loom-tools-splunk/
     loom-tools-demo/    # synthetic data, used by tests
