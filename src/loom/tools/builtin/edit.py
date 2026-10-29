@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from loom.broker.approval import Access
 from loom.tools.base import ToolContext, ToolResult
 from loom.tools.builtin.write import unified_diff
 
@@ -20,6 +21,9 @@ class EditTool:
         "lines to make it unique) unless replace_all is true. Read the file first."
     )
     input_model = EditArgs
+
+    def access(self, args: EditArgs, ctx: ToolContext) -> Access:
+        return Access("write", ctx.paths.display(ctx.paths.resolve(args.path)))
 
     async def run(self, args: EditArgs, ctx: ToolContext) -> ToolResult:
         path = ctx.paths.resolve(args.path)

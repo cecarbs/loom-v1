@@ -4,6 +4,7 @@ import base64
 
 from pydantic import BaseModel, Field
 
+from loom.broker.approval import Access
 from loom.core.messages import ImageBlock
 from loom.tools.base import ToolContext, ToolResult
 
@@ -31,10 +32,15 @@ class ReadTool:
     )
     input_model = ReadArgs
 
-    async def run(self, args: ReadArgs, ctx: ToolContext) -> ToolResult:
+    def access(self, args: ReadArgs, ctx: ToolContext) -> Access:
         path = ctx.paths.resolve(args.path)
-        if error := ctx.paths.read_error(path):
-            return ToolResult(error, True)
+        if reason := ctx.paths.read_approval_reason(path):
+            return Access("outside_read", str(path), reason, scope=f"read:{path}")
+        return Access("read")
+
+    async def run(self, args: ReadArgs, ctx: ToolContext) -> ToolResult:
+        # The path policy is applied before this runs (ToolSet asks for approval).
+        path = ctx.paths.resolve(args.path)
         if not path.exists():
             return ToolResult(f"File not found: {path}", True)
         if path.is_dir():

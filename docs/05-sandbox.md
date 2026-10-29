@@ -7,6 +7,7 @@ All model-driven execution (`bash`, the kernel runner) goes through a `SandboxBa
 ```python
 class SandboxBackend(Protocol):
     name: str
+    python: str                                                    # kernel interpreter (below)
     async def start(self, session: SessionInfo) -> None: ...      # e.g. create container
     async def spawn(self, argv: list[str], *, cwd: Path, env: dict[str, str],
                     stdin: bool = False, purpose: Literal["bash", "kernel"],
@@ -15,15 +16,21 @@ class SandboxBackend(Protocol):
     def describe(self) -> str: ...                                 # shown in TUI footer
 
 class SandboxProcess(Protocol):
+    pid: int
     stdin: asyncio.StreamWriter | None
     stdout: asyncio.StreamReader
     stderr: asyncio.StreamReader
-    async def wait(self) -> int: ...
+    returncode: int | None
+    async def wait(self) -> int: ...       # the process itself, NOT children holding its pipes
     def send_signal(self, sig: int) -> None: ...
     def kill(self) -> None: ...                                    # whole process group
 ```
 
-`env` passed to sandboxed processes is built from an **allowlist** (`PATH`, `HOME` (sandbox home), `LANG`, `TERM`, `TMPDIR`, plus `[sandbox] env_passthrough`). The host environment is never inherited wholesale.
+`env` passed to sandboxed processes is built from an **allowlist** (`PATH`, `HOME` (sandbox home), `LANG`, `TERM`, `TMPDIR`, plus `[sandbox] env_passthrough`) by `loom.sandbox.base.sandbox_env`. The host environment is never inherited wholesale.
+
+Note on `wait()`: asyncio's `Process.wait()` also waits for the pipes to close, which never happens while a background child (`sleep 100 &`) still holds them; backends must return when the process itself exits.
+
+Until M5, `create_backend` only knows `none`; asking for `seatbelt`/`docker` is a startup error (exit 2).
 
 Every backend starts processes in a **new session / process group** (`start_new_session=True`), so terminal Ctrl+C is delivered only to loom, and `kill()` can take down the whole group.
 

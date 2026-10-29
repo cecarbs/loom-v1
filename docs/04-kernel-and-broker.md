@@ -35,13 +35,14 @@ flowchart TB
 
 - Started lazily on first `execute` (or eagerly with `[kernel] eager = true`).
 - One kernel per session. Sub-agents get their own kernel.
-- States: `starting → idle ⇄ busy → dead`. Emitted as `KernelStatus` events; shown in the TUI footer.
-- On crash/timeout kill: restarted on next `execute`, and the next result is prefixed with `[kernel restarted — previous variables are gone]`.
+- States: `off → starting → idle ⇄ busy → dead`. Emitted as `KernelStatus(state, vars)` events (`vars` = number of user variables, reported by the runner after every execution); shown in the TUI footer.
+- Started as `<python> -I <session_dir>/sandbox/runner.py` with cwd = workspace. `-I` keeps `PYTHON*` variables and user site-packages out; the runner then puts the workspace on `sys.path` so `import mymodule` works as in Jupyter.
+- On crash/timeout kill: restarted on next `execute`, and the next result is prefixed with `[kernel restarted — previous variables are gone]` (once). An unexpected exit also emits a `Notice`. A timeout kills the kernel (no SIGINT first). Startup failures become an `execute` error result, not a crash.
 - `/kernel` shows the inventory; `/kernel reset` restarts it.
 
 ## Protocol (JSON lines)
 
-Transport: the runner's original stdout/stdin. At startup the runner **dup()s fd 1 to a private protocol fd**, then redirects fd 1 and fd 2 to pipes read by a background thread, so that `print()`, C extensions, and subprocesses spawned by model code can never corrupt the protocol stream. All captured output becomes `stream` messages.
+Transport: the runner's original stdout/stdin. At startup the runner **dup()s fds 0 and 1 to private (non-inheritable) protocol fds**, points fd 0 at `/dev/null`, then redirects fd 1 and fd 2 to pipes read by background threads, so that `print()`, `input()`, C extensions, and subprocesses spawned by model code can never corrupt the protocol stream. All captured output becomes `stream` messages. After each execution the runner writes a sync marker into both pipes and waits until the capture threads reach it, so every `stream` message of an execution precedes its `execute_result`. Output arriving between executions (background threads/processes) is sent with `"id": null` and dropped by the host.
 
 Every message is one JSON object per line, UTF-8. Host → kernel:
 
@@ -57,17 +58,20 @@ Every message is one JSON object per line, UTF-8. Host → kernel:
 Kernel → host:
 
 ```jsonc
-{"type": "ready", "python": "3.12.6", "pid": 4242}
+{"type": "ready", "python": "3.12.6", "pid": 4242}   // sent after `init` is applied
 {"type": "stream", "id": "e7", "name": "stdout", "text": "..."}
 {"type": "tool_call", "id": "e7", "call_id": "c3", "tool": "splunk.search", "args": {"spl": "..."}}
-{"type": "execute_result", "id": "e7", "status": "ok", "value_repr": "48211", "duration_ms": 913}
+{"type": "execute_result", "id": "e7", "status": "ok", "value_repr": "48211", "duration_ms": 913, "vars": 3}
+{"type": "execute_result", "id": "e8", "status": "ok", "duration_ms": 40, "vars": 3, "out_ref": 8}  // full text kept as _out[8]
 {"type": "execute_result", "id": "e7", "status": "error", "error": {"ename": "KeyError", "evalue": "'host'", "traceback": "..."}}
 {"type": "inventory_result", "id": "i1", "vars": [{"name": "rows", "type": "list", "summary": "len=48211"}, {"name": "df", "type": "DataFrame", "summary": "48211x7"}]}
 ```
 
 `args` is always a single dict of named parameters: the stub binds positional and keyword arguments with `inspect.Signature.bind`, applies defaults, and sends the result. Tool functions therefore may not use `*args`/`**kwargs` (the registry rejects them).
 
-Interrupt: the host sends **SIGINT** to the runner process (not a protocol message), which raises `KeyboardInterrupt` in the executing code; the runner replies with `execute_result` status `error`, ename `KeyboardInterrupt`. If no reply within 3 s, the host kills the process (kernel → dead). The runner is spawned in its own process group (`05-sandbox.md`), so a terminal Ctrl+C reaches only loom, which decides whether to interrupt.
+`inventory` is answered by the runner's protocol thread, so it works while a cell runs.
+
+Interrupt: the host sends **SIGINT** to the runner process (not a protocol message), which raises `KeyboardInterrupt` in the executing code (the runner's handler ignores SIGINT while idle); the runner replies with `execute_result` status `error`, ename `KeyboardInterrupt`. If no reply within 3 s, the host kills the process (kernel → dead). The runner is spawned in its own process group (`05-sandbox.md`), so a terminal Ctrl+C reaches only loom, which decides whether to interrupt.
 
 Abandoned calls: if an execution is interrupted or times out while a stub is waiting, the host cancels that broker call (a pending approval resolves as deny, logged with `by: "cancel"`). A `tool_result` for an unknown or abandoned `call_id` is dropped by the runner.
 
@@ -93,6 +97,8 @@ def execute(code):
             return reprlib_limited(value)
 ```
 
+- Errors (including `SyntaxError`, `KeyboardInterrupt`, `SystemExit`) become `status: "error"`; the traceback starts at the first `<cell eN>` frame, and cell source is registered with `linecache` so tracebacks show the failing line. `sys.exit()` does not end the kernel.
+- The namespace is a real module (`__loom__`, registered in `sys.modules`) so classes defined in cells can be pickled. The inventory lists names not starting with `_`, excluding modules and names the runner put there itself (stubs).
 - Top-level `await` is supported by compiling with `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` and running the coroutine on a runner-owned event loop.
 - Stubs are **synchronous**: a stub writes a `tool_call` message and blocks on a per-call `threading.Event` until the matching `tool_result` arrives (a reader thread dispatches incoming messages). This keeps model code simple (`rows = splunk.search(...)`).
 - Stubs carry real signatures and docstrings (`inspect.Signature` built from the catalog), so `help(splunk.search)` works inside the kernel.

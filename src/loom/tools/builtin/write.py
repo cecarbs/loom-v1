@@ -4,6 +4,7 @@ import difflib
 
 from pydantic import BaseModel, Field
 
+from loom.broker.approval import Access
 from loom.tools.base import ToolContext, ToolResult
 
 
@@ -19,6 +20,9 @@ class WriteTool:
         "file first. Prefer edit for changes to existing files."
     )
     input_model = WriteArgs
+
+    def access(self, args: WriteArgs, ctx: ToolContext) -> Access:
+        return Access("write", ctx.paths.display(ctx.paths.resolve(args.path)))
 
     async def run(self, args: WriteArgs, ctx: ToolContext) -> ToolResult:
         path = ctx.paths.resolve(args.path)

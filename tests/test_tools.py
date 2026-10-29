@@ -93,16 +93,24 @@ async def test_read_outside_workspace_and_sensitive_paths(
     ssh.mkdir(parents=True)
     (ssh / "id_rsa").write_text("key")
 
-    assert "outside the workspace" in (await read(ctx, "../outside.txt")).text
-    assert "sensitive" in (await read(ctx, ".env")).text
-    assert "sensitive" in (await read(ctx, str(ssh / "id_rsa"))).text
+    def access(path: str):
+        return ReadTool().access(ReadArgs.model_validate({"path": path}), ctx)
+
+    outside = access("../outside.txt")
+    assert outside.kind == "outside_read" and outside.reason == "outside the workspace"
+    assert outside.scope == f"read:{(tmp_path / 'outside.txt').resolve()}"
+    assert access(".env").reason == "a sensitive path"
+    assert access(str(ssh / "id_rsa")).reason == "a sensitive path"
+    assert access("inside.txt").kind == "read"
+    # @mentions can't ask, so they get an error message instead.
+    assert "needs approval" in (ctx.paths.read_error((ws / ".env").resolve()) or "")
 
 
 async def test_read_symlink_escape_is_blocked(ctx: ToolContext, ws: Path, tmp_path: Path) -> None:
     (tmp_path / "outside.txt").write_text("secret")
     os.symlink(tmp_path / "outside.txt", ws / "link.txt")
-    result = await read(ctx, "link.txt")
-    assert result.is_error and "outside the workspace" in result.text
+    access = ReadTool().access(ReadArgs.model_validate({"path": "link.txt"}), ctx)
+    assert access.kind == "outside_read" and access.reason == "outside the workspace"
 
 
 async def test_read_spill_dir_allowed_despite_being_under_loom(
@@ -110,6 +118,7 @@ async def test_read_spill_dir_allowed_despite_being_under_loom(
 ) -> None:
     spill = tmp_path / "home" / ".loom" / "sessions" / "s" / "out" / "0001.txt"
     spill.write_text("spilled output")
+    assert ReadTool().access(ReadArgs.model_validate({"path": str(spill)}), ctx).kind == "read"
     result = await read(ctx, str(spill))
     assert not result.is_error and "spilled output" in result.text
 

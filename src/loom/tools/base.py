@@ -12,9 +12,12 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError
 
+from loom.broker.approval import Access, Approvals, denial_text
 from loom.core.events import EventBus, ToolCallFinished, ToolCallStarted
 from loom.core.messages import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
+from loom.kernel.client import KernelClient
 from loom.providers.base import INVALID_JSON_KEY, ToolSchema
+from loom.sandbox.base import SandboxBackend
 from loom.session.store import SessionLog
 from loom.tools.budget import OutputBudget
 from loom.tools.paths import PathPolicy, ReadSet
@@ -40,6 +43,10 @@ class ToolContext:
     bus: EventBus
     call_id: str = ""
     model_accepts_images: bool = True
+    sandbox: SandboxBackend | None = None
+    sandbox_env: dict[str, str] = field(default_factory=dict)
+    kernel: KernelClient | None = None
+    workspace_writable: bool = True
 
 
 class Tool(Protocol):
@@ -52,18 +59,31 @@ class Tool(Protocol):
     async def run(self, args: Any, ctx: ToolContext) -> ToolResult: ...
 
 
+class GatedTool(Tool, Protocol):
+    """A tool the approval policy checks before it runs (all built-ins). ToolSet looks the
+    method up by name, so tools without it (test doubles) always run."""
+
+    def access(self, args: Any, ctx: ToolContext) -> Access: ...
+
+
 # Consecutive calls to these tools may run concurrently.
 CONCURRENT_TOOLS = frozenset({"read"})
 
 
 class ToolSet:
     def __init__(
-        self, tools: Sequence[Tool], budget: OutputBudget, session_log: SessionLog, bus: EventBus
+        self,
+        tools: Sequence[Tool],
+        budget: OutputBudget,
+        session_log: SessionLog,
+        bus: EventBus,
+        approvals: Approvals | None = None,
     ) -> None:
         self._tools = {t.name: t for t in tools}
         self._budget = budget
         self._log = session_log
         self._bus = bus
+        self.approvals = approvals
 
     @property
     def budget(self) -> OutputBudget:
@@ -102,7 +122,10 @@ class ToolSet:
         start = time.monotonic()
 
         result = await self._execute(call, replace(ctx, call_id=call.id))
-        text, spill = self._budget.apply(result.text)
+        kernel_ref = result.meta.get("kernel_ref")
+        text, spill = self._budget.apply(
+            result.text, kernel_ref=kernel_ref if isinstance(kernel_ref, int) else None
+        )
         if spill:
             result.meta["spill_path"] = str(spill)
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -147,6 +170,12 @@ class ToolSet:
             )
             return ToolResult(f"Invalid arguments for {call.name}:\n{problems}", True)
         try:
+            access = getattr(tool, "access", None)
+            if self.approvals is not None and access is not None:
+                approvals = self.approvals
+                decision = await approvals.check(call.name, access(args, ctx), call_id=call.id)
+                if not decision.allowed:
+                    return ToolResult(denial_text(call.name, decision, approvals.mode), True)
             return await tool.run(args, ctx)
         except Exception as e:  # a tool bug must not end the turn
             log.exception("tool %s failed", call.name)

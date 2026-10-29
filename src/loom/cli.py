@@ -10,6 +10,7 @@ from typing import Any, get_args
 
 from loom import __version__
 from loom.config import ApprovalMode, ConfigError, LoomConfig, SandboxBackendName, load_config
+from loom.sandbox.base import SandboxUnavailable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"loom: {notice}", file=sys.stderr)
     try:
         asyncio.run(_interactive(loaded.config))
+    except SandboxUnavailable as e:
+        print(f"loom: {e}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
@@ -57,4 +61,9 @@ async def _interactive(config: LoomConfig) -> None:
     from loom.app import App
     from loom.tui.app import InlineUI
 
-    await InlineUI(App(Path.cwd().resolve(), config)).run()
+    app = App(Path.cwd().resolve(), config)
+    await app.start()
+    try:
+        await InlineUI(app).run()
+    finally:
+        await app.aclose()

@@ -55,8 +55,9 @@ class InlineUI:
         return " " + status_line(
             self.renderer.status,
             self.app.profile.alias,
-            config.sandbox.backend,
+            self.app.backend.describe(),
             config.approvals.mode,
+            self.renderer.status.kernel(),
         )
 
     async def run(self) -> None:

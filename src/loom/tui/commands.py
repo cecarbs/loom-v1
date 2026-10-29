@@ -78,8 +78,8 @@ def _help(ctx: CommandContext, args: str) -> None:
     ctx.console.print(table)
     ctx.console.print(
         Text(
-            "Enter sends · Shift+Enter, Alt+Enter or Ctrl+J for a newline · @path attaches a file · "
-            "Ctrl+C cancels a turn · Ctrl+D quits",
+            "Enter sends · Shift+Enter, Alt+Enter or Ctrl+J for a newline · "
+            "@path attaches a file · Ctrl+C cancels a turn · Ctrl+D quits",
             style="dim",
         )
     )
@@ -117,11 +117,36 @@ def _cost(ctx: CommandContext, args: str) -> None:
         ctx.console.print(Text("No pricing configured for this model.", style="dim"))
 
 
-def _clear(ctx: CommandContext, args: str) -> None:
-    session_id = ctx.app.new_session()
+async def _clear(ctx: CommandContext, args: str) -> None:
+    session_id = await ctx.app.new_session()
     ctx.renderer.status.context_pct = 0.0
     ctx.renderer.status.cost_usd = ctx.app.agent.cost_usd
     ctx.console.print(Text(f"New session {session_id}", style="dim"))
+
+
+async def _kernel(ctx: CommandContext, args: str) -> None:
+    app = ctx.app
+    if args == "reset":
+        await app.reset_kernel()
+        ctx.console.print(Text("Kernel restarted; its variables are gone.", style="dim"))
+        return
+    if args:
+        ctx.console.print(Text("Usage: /kernel [reset]", style="red"))
+        return
+    kernel = app.kernel
+    pid = f" (pid {kernel.pid})" if kernel.pid else ""
+    ctx.console.print(f"Kernel: [bold]{kernel.state}[/]{pid} · sandbox {app.backend.describe()}")
+    variables = await app.kernel_inventory()
+    if not variables:
+        ctx.console.print(Text("No variables.", style="dim"))
+        return
+    table = Table(box=None, padding=(0, 2), show_edge=False)
+    table.add_column("name", style="bold")
+    table.add_column("type", style="cyan")
+    table.add_column("summary", style="dim")
+    for var in variables:
+        table.add_row(var.name, var.type, var.summary)
+    ctx.console.print(table)
 
 
 def _thinking(ctx: CommandContext, args: str) -> None:
@@ -147,6 +172,7 @@ BUILTINS = (
     Command("model", "show or switch the model", _model, "[alias]"),
     Command("cost", "token usage and cost for this session", _cost),
     Command("clear", "start a new session in this workspace", _clear),
+    Command("kernel", "show kernel variables, or restart it", _kernel, "[reset]"),
     Command("thinking", "show or collapse thinking output", _thinking, "on|off"),
     Command("exit", "quit", _exit, aliases=("quit",)),
 )

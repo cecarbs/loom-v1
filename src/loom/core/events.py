@@ -91,11 +91,17 @@ class ApprovalRequested:
 class Decision:
     action: Literal["allow_once", "allow_session", "deny"]
     message: str | None = None  # "deny with message": returned to the model as the error text
-    by: Literal["user", "policy", "override", "cancel"] = "user"
+    by: Literal["user", "session", "policy", "override", "cancel"] = "user"
 
     @property
     def allowed(self) -> bool:
         return self.action != "deny"
+
+
+@dataclass(frozen=True)
+class KernelStatus:
+    state: Literal["off", "starting", "idle", "busy", "dead"]
+    vars: int | None = None  # variables in the kernel namespace, when known
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,7 @@ AgentEvent = (
     | ToolCallOutput
     | ToolCallFinished
     | ApprovalRequested
+    | KernelStatus
     | Notice
     | ErrorEvent
     | UsageUpdated

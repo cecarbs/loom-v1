@@ -38,6 +38,9 @@ line-length = 100
 target-version = "py312"
 extend-exclude = ["docs"]  # doc snippets are intentionally compact
 
+[tool.ruff.per-file-target-version]
+"src/loom/kernel/runner.py" = "py311"  # runs inside the sandbox on any Python >= 3.11
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "RUF"]
 

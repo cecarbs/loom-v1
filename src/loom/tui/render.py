@@ -39,6 +39,15 @@ class Status:
 
     context_pct: float = 0.0
     cost_usd: float | None = None
+    kernel_state: str = "off"
+    kernel_vars: int | None = None
+
+    def kernel(self) -> str:
+        """`kernel idle (3 vars)`; plain `kernel off` before the first execute."""
+        if self.kernel_vars is None or self.kernel_state in ("off", "dead", "starting"):
+            return f"kernel {self.kernel_state}"
+        plural = "" if self.kernel_vars == 1 else "s"
+        return f"kernel {self.kernel_state} ({self.kernel_vars} var{plural})"
 
 
 class _Tail:
@@ -98,6 +107,9 @@ class Renderer:
                 with self.suspended():
                     decision = await self.approver.ask(event)
                 self.bus.respond(event.request_id, decision)
+            case ev.KernelStatus(state, variables):
+                self.status.kernel_state = state
+                self.status.kernel_vars = variables
             case ev.Notice(text):
                 self.close()
                 self.console.print(Text(f"· {text}", style="yellow"))
@@ -235,6 +247,6 @@ def format_cost(cost: float | None) -> str:
 
 
 def status_line(status: Status, model: str = "", *rest: str) -> str:
-    """`sonnet · ctx 18% · $0.04 · none · ask` (the parts that are given)."""
+    """`sonnet · ctx 18% · $0.04 · none · ask · kernel idle (3 vars)` (the parts given)."""
     parts = [model, f"ctx {status.context_pct:.0%}", format_cost(status.cost_usd), *rest]
     return " · ".join(p for p in parts if p)

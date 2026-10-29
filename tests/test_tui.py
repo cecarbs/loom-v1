@@ -156,6 +156,20 @@ def test_status_line() -> None:
     assert status_line(Status(0.5, 12.345)) == "ctx 50% · $12.35"
 
 
+def test_kernel_status_in_toolbar() -> None:
+    assert Status().kernel() == "kernel off"
+    assert Status(kernel_state="idle", kernel_vars=3).kernel() == "kernel idle (3 vars)"
+    assert Status(kernel_state="busy", kernel_vars=1).kernel() == "kernel busy (1 var)"
+    assert Status(kernel_state="dead").kernel() == "kernel dead"
+
+
+async def test_renderer_tracks_kernel_status(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [])
+    ui = InlineUI(app, console=console(), source=Lines(), approver=Approve())
+    await app.bus.emit(ev.KernelStatus("idle", 2))
+    assert ui.toolbar() == " sonnet · ctx 0% · $0.0000 · none · ask · kernel idle (2 vars)"
+
+
 # --- approvals --------------------------------------------------------------------
 
 REQUEST = ev.ApprovalRequested("r1", "splunk.create_saved_search", 'name = "x"', "write")
@@ -297,7 +311,8 @@ async def test_help_model_cost_thinking_exit(tmp_path: Path) -> None:
     app = make_app(tmp_path, [], config)
 
     _, out = await _command(app, "/help")
-    assert all(f"/{n}" in out for n in ("help", "model", "cost", "clear", "thinking", "exit"))
+    names = ("help", "model", "cost", "clear", "kernel", "thinking", "exit")
+    assert all(f"/{n}" in out for n in names)
 
     _, out = await _command(app, "/model")
     assert "sonnet" in out and "local" in out
@@ -329,6 +344,40 @@ async def test_clear_starts_new_session(tmp_path: Path) -> None:
     _, out = await _command(app, "/clear")
     assert app.agent.history == [] and app.agent.log.path != old_log
     assert app.session_id in out
+
+
+async def test_kernel_command_shows_inventory_and_resets(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [], LoomConfig.model_validate({"approvals": {"mode": "yolo"}}))
+    try:
+        _, out = await _command(app, "/kernel")
+        assert "Kernel: off" in out and "No variables." in out
+
+        await app.kernel.execute("rows = list(range(5))\nlabel = 'x'", timeout_s=10)
+        _, out = await _command(app, "/kernel")
+        assert "Kernel: idle" in out and f"pid {app.kernel.pid}" in out
+        assert "rows" in out and "list" in out and "len=5" in out and "label" in out
+
+        old_pid = app.kernel.pid
+        _, out = await _command(app, "/kernel reset")
+        assert "Kernel restarted" in out and app.kernel.pid != old_pid
+        _, out = await _command(app, "/kernel")
+        assert "No variables." in out
+
+        _, out = await _command(app, "/kernel bogus")
+        assert "Usage: /kernel [reset]" in out
+    finally:
+        await app.aclose()
+
+
+async def test_clear_shuts_down_the_old_kernel(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [])
+    old = app.kernel
+    await old.execute("x = 1", timeout_s=10)
+    await app.new_session()
+    try:
+        assert old.state == "dead" and app.kernel is not old and app.kernel.state == "off"
+    finally:
+        await app.aclose()
 
 
 # --- the main loop ------------------------------------------------------------------
@@ -383,6 +432,47 @@ async def test_ctrl_c_cancels_running_turn_and_returns_to_prompt(tmp_path: Path)
     assert first_reply.meta.get("interrupted") is True
     assert not ui.renderer.active
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+async def test_ctrl_c_interrupts_kernel_loop_and_kernel_survives(tmp_path: Path) -> None:
+    from loom.core.messages import ToolResultBlock, ToolUseBlock
+
+    app = make_app(
+        tmp_path,
+        [
+            [ToolUseBlock("e1", "execute", {"code": "kept = 7"})],
+            [ToolUseBlock("e2", "execute", {"code": "while True: pass"})],
+            [ToolUseBlock("e3", "execute", {"code": "kept"})],
+            [TextBlock("still here")],
+        ],
+        LoomConfig.model_validate({"approvals": {"mode": "yolo"}}),
+    )
+    c = console(terminal=True)
+    ui = InlineUI(app, console=c, source=Lines("spin", "check", None), approver=Approve())
+    loop = asyncio.get_running_loop()
+    sent = False
+
+    async def interrupt_when_busy(event: ev.AgentEvent) -> None:
+        nonlocal sent
+        if isinstance(event, ev.ToolCallStarted) and event.id == "e2" and not sent:
+            sent = True
+            loop.call_later(0.5, os.kill, os.getpid(), signal.SIGINT)  # a real Ctrl+C
+
+    app.bus.subscribe(interrupt_when_busy)
+    try:
+        await asyncio.wait_for(ui.run(), 15)
+        out = output(c)
+        assert "[cancelled]" in out and "still here" in out
+        assert app.kernel.state == "idle"
+        results = [
+            b.content
+            for m in app.agent.history
+            for b in m.content
+            if isinstance(b, ToolResultBlock)
+        ]
+        assert results[-1] == "7"  # same kernel, variables kept, no restart prefix
+    finally:
+        await app.aclose()
 
 
 async def test_approval_suspends_live_region_and_resumes_with_a_fresh_one() -> None:

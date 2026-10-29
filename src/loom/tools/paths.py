@@ -45,15 +45,20 @@ class PathPolicy:
             else str(path)
         )
 
-    def read_error(self, path: Path) -> str | None:
+    def read_approval_reason(self, path: Path) -> str | None:
+        """Why reading `path` needs approval, or None if it's in the allowed roots."""
         if any(path.is_relative_to(root) for root in self.read_roots):
             return None
         if self._in_sensitive_dir(path) or _is_env_file(path):
-            return f"{path} is a sensitive path; reading it needs approval (not available yet)."
+            return "a sensitive path"
         if not path.is_relative_to(self.workspace):
-            return (
-                f"{path} is outside the workspace; reading it needs approval (not available yet)."
-            )
+            return "outside the workspace"
+        return None
+
+    def read_error(self, path: Path) -> str | None:
+        """For readers that can't ask for approval (`@path` mentions)."""
+        if reason := self.read_approval_reason(path):
+            return f"{path} is {reason}; reading it needs approval (ask loom to read it)."
         return None
 
     def write_error(self, path: Path) -> str | None:

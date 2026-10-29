@@ -178,7 +178,7 @@ async def run_turn(self, user_input: str, attachments: list[Block] = ()) -> None
 ```
 
 - **Tool execution order:** sequential. Exception: consecutive `read` calls may run concurrently.
-- **Cancellation:** the TUI cancels the turn's `asyncio.Task`. The loop catches `CancelledError`, interrupts any running kernel execution (`KernelClient.interrupt()`), kills running bash processes, cancels in-flight broker calls (pending approvals resolve as deny), logs `TurnCancelled`, and returns. History repair:
+- **Cancellation:** the TUI cancels the turn's `asyncio.Task`. The cancellation reaches the running tool first, which cleans up on its way out (`execute` SIGINTs the kernel and waits up to 3 s for its reply, `bash` kills its process group, a pending approval resolves as deny and is logged with `by: "cancel"`; in-flight broker calls are cancelled the same way from M4). The loop then catches `CancelledError`, logs `TurnCancelled`, and returns. History repair:
   - Cancelled **while streaming**: keep the partial assistant text (with `meta.interrupted = true`); drop `ToolUseBlock`s whose input was not complete. If nothing remains, drop the assistant message.
   - Cancelled **during a tool batch**: completed calls keep their real results; the running and not-yet-started calls get `ToolResultBlock(content="Interrupted by user", is_error=True)`.
 - **Steering:** not in v1 (see `00-overview.md` Non-goals). Input is not accepted while a turn runs.
@@ -192,13 +192,13 @@ TurnStarted, TextDelta, ThinkingDelta, AssistantMessageDone,
 ToolCallStarted(id, name, input), ToolCallOutput(id, chunk),   # live streaming from bash/execute
 ToolCallFinished(id, result_preview, is_error, duration_ms),
 ApprovalRequested(request_id, tool, args_preview, effect, agent_id=None),  # answer via bus.respond()
-KernelStatus(state: "starting"|"idle"|"busy"|"dead"),
+KernelStatus(state: "off"|"starting"|"idle"|"busy"|"dead", vars: int | None),
 Compacted(before_tokens, after_tokens), Notice(text), ErrorEvent(text),
 UsageUpdated(input_tokens, output_tokens, cache_read, context_pct, cost_usd),  # cost: session total or None
 TurnCancelled, TurnFinished
 ```
 
-`ApprovalRequested` is the only event that expects a reply. The broker calls `await bus.request_approval(event)`, which emits the event and awaits an `asyncio.Future`; the TUI answers with `bus.respond(request_id, Decision(action, message=None, by="user"))`, `action` being `allow_once`, `allow_session` or `deny`. Nothing resolves the future on its own, so an unanswered request never allows; callers that need a deadline or a cancel-means-deny rule wrap the await.
+`ApprovalRequested` is the only event that expects a reply. The broker calls `await bus.request_approval(event)`, which emits the event and awaits an `asyncio.Future`; the TUI answers with `bus.respond(request_id, Decision(action, message=None, by="user"))`, `action` being `allow_once`, `allow_session` or `deny` (`by` records who decided: `user`, `session`, `policy`, `override`, `cancel`). Nothing resolves the future on its own, so an unanswered request never allows; callers that need a deadline or a cancel-means-deny rule wrap the await.
 
 Other loop rules:
 - An assistant reply with no content (seen with small local models that only produce reasoning) is not appended to history; the loop emits a `Notice` and ends the turn.

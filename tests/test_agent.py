@@ -94,14 +94,15 @@ async def test_read_edit_final_answer(tmp_path: Path) -> None:
 
     # The model saw the system prompt and the tool schemas.
     request = h.provider.requests[0]
-    assert {t.name for t in request.tools} == {"read", "write", "edit"}
-    assert "`edit`" in request.system and "`execute`" not in request.system
+    assert {t.name for t in request.tools} == {"read", "write", "edit", "bash", "execute"}
+    assert "`edit`" in request.system and "`execute`" in request.system
+    assert "`search_tools`" not in request.system  # only guidance for tools that exist
 
     kinds = h.log_kinds()
     assert kinds[0] == "session_start"
     assert kinds.count("model_request") == 3
     first = next(r for r in h.agent.log.read() if r["kind"] == "model_request")
-    assert first["settings"]["max_tokens"] == 64_000 and first["settings"]["tools"] == 3
+    assert first["settings"]["max_tokens"] == 64_000 and first["settings"]["tools"] == 5
     assert kinds.count("tool_call") == kinds.count("tool_result") == 2
     assert kinds.count("message") == 6
     assert [type(e) for e in h.events][-1] is ev.TurnFinished

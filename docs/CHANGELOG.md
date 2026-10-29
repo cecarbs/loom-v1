@@ -1,5 +1,31 @@
 # Changelog
 
+## M3 — Kernel, bash, `SandboxBackend` (`none` only)
+
+- `loom.sandbox`: `SandboxBackend` / `SandboxProcess` protocols, `none` backend (own process
+  group per process, group kill), allowlisted environment with sandbox `HOME`/`TMPDIR`.
+  `seatbelt`/`docker` are a startup error until M5.
+- `loom/kernel/runner.py` (stdlib only, checked by an AST scan; also tested on Python 3.11):
+  private protocol fds, fd 0 → `/dev/null`, fds 1/2 captured by threads with a sync marker so
+  output always precedes the result, persistent `__loom__` module namespace, last-expression
+  repr via `reprlib`, top-level `await`, `_out[n]` for over-budget output, inventory answered
+  while busy, SIGINT → `KeyboardInterrupt` only while executing, `sys.exit()` survivable.
+- `KernelClient`: lazy start, `KernelStatus` events, interrupt (SIGINT, 3 s grace, then kill),
+  timeout kill, crash notice, one-time restart prefix, `reset`, `inventory`, session log
+  entries `kernel_start/execute/interrupt/kill/exit`.
+- Tools `bash` (streaming, timeout, group kill, also after exit so background children can't
+  hang it) and `execute` (streaming, `_out` hint in the budget marker, restart prefix).
+- `loom.broker.approval`: sandbox-aware built-in policy table, overrides, per-session allows
+  (per path for `read`), `approval` log entries; `read` outside the roots or of sensitive paths
+  now asks instead of failing.
+- TUI: `/kernel`, `/kernel reset`, kernel state in the toolbar; `/clear` shuts the old kernel
+  down. `App.start()` / `App.aclose()`.
+- Protocol additions (docs/04 updated): `ready` follows `init`; `execute_result` carries `vars`
+  and `out_ref`; between-execution output has `id: null`.
+- Fix found while testing: asyncio's `Process.wait()` waits for the pipes to close, so
+  `bash -c "sleep 30 &"` hung until the child exited; `SandboxProcess.wait()` now returns when
+  the process itself exits.
+
 ## M2 — Inline TUI
 
 - `loom.tui`: prompt_toolkit input (persistent history, Enter / Alt+Enter / Ctrl+J, `/` and `@`

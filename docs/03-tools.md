@@ -55,6 +55,8 @@ Built-in tools go through the same approval machinery as broker tools (`loom.bro
 | `bash`, `execute` — sandboxed (`seatbelt`, `docker`) | allow, workspace mounted read-only | allow | allow | allow |
 | `bash`, `execute` — backend `none` | ask | ask | allow | allow |
 
+Approval scope: "allow for this session" covers the tool (`bash`, `execute`), except for `read`, where it covers that one path. The prompt shows the effect as `exec`, `outside read` or `write`, and for `read` the reason (`outside the workspace` / `a sensitive path`). Denials return an error result: `The user denied this bash call[: <message>]`, `write is not allowed in read-only mode.`, or `bash is denied by the user's configuration.` Every decision other than a plain table "allow" is logged as an `approval` entry (`by`: `user`, `session`, `policy`, `override`, `cancel`). `@path` mentions can't ask, so sensitive/outside mentions are not attached.
+
 `[approvals.overrides]` accepts built-in tool names too (e.g. `"bash" = "allow"`). In `loom -p`, `ask` resolves to deny. Changing into or out of `read-only` mid-session with the docker backend recreates the container (kernel restart notice).
 
 ## Specs
@@ -88,12 +90,12 @@ File must have been `read` and unchanged since (mtime+hash). `old_string` must m
 command: str
 timeout_s: int = 120     # max 600
 ```
-Runs `/bin/bash -lc <command>` through the sandbox backend with cwd = workspace. Fresh shell each call (no persisted env). Streams stdout/stderr as `ToolCallOutput` events. Result: combined output + `exit code: N`. On timeout: kill the process group, return what was captured plus "timed out after Ns".
+Runs `/bin/bash -lc <command>` through the sandbox backend with cwd = workspace. Fresh shell each call (no persisted env). When the command exits, its process group is killed, so background processes (`server &`) don't outlive the call or keep its pipes open. Exit code in `meta.exit_code`; a non-zero exit is an error result. Streams stdout/stderr as `ToolCallOutput` events. Result: combined output + `exit code: N`. On timeout: kill the process group, return what was captured plus "timed out after Ns".
 
 ### `execute`
 ```
 code: str
-timeout_s: int = 300     # max 1800; clock pauses while waiting on an approval
+timeout_s: int | None    # default [kernel] default_timeout_s (300); max 1800; clock pauses while waiting on a broker approval
 ```
 Sends code to the persistent kernel (see `04-kernel-and-broker.md`). Result text is: captured stdout/stderr, then the repr of the last expression if any, then an error traceback if any. If the kernel died or was restarted, the result starts with `[kernel restarted — previous variables are gone]`.
 
