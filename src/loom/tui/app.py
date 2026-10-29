@@ -10,6 +10,7 @@ import termios
 from collections.abc import Coroutine, Iterator
 from typing import Any, TextIO
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from rich.console import Console
 from rich.panel import Panel
@@ -18,7 +19,12 @@ from rich.text import Text
 from loom.app import App
 from loom.session.store import loom_home
 from loom.tui.approvals import ApprovalPrompt, DenyAll
-from loom.tui.commands import CommandContext, CommandRegistry, builtin_commands
+from loom.tui.commands import (
+    CommandContext,
+    CommandRegistry,
+    builtin_commands,
+    print_resumed,
+)
 from loom.tui.input import CTRL_C, LineSource, LoomCompleter, PipedInput, PromptInput
 from loom.tui.render import Approver, Renderer, status_line
 
@@ -36,11 +42,14 @@ class InlineUI:
         self.app = app
         self.console = console or Console(highlight=False)
         interactive = sys.stdin.isatty() and self.console.is_terminal
+        self.interactive = interactive
         self.commands = commands or builtin_commands()
         if approver is None:
             approver = ApprovalPrompt(self.console) if interactive else DenyAll(self.console)
         self.renderer = Renderer(self.console, approver, app.bus)
         self.renderer.status.cost_usd = app.agent.cost_usd
+        if app.agent.history:  # resumed
+            self.renderer.status.context_pct = app.agent.context_pct
         app.bus.subscribe(self.renderer)
         if source is None:
             completer = LoomCompleter(app.workspace, self.commands.commands)
@@ -81,6 +90,8 @@ class InlineUI:
         )
         for notice in self.app.notices:
             self.console.print(Text(f"· {notice}", style="yellow"))
+        if self.app.resumed:
+            print_resumed(self.console, self.app)
         ctrl_c_pending = False
         while True:
             line = await self.source.read()
@@ -96,7 +107,14 @@ class InlineUI:
             if not line.strip():
                 continue
             if CommandRegistry.is_command(line):
-                ctx = CommandContext(self.app, self.console, self.renderer, self.commands)
+                ctx = CommandContext(
+                    self.app,
+                    self.console,
+                    self.renderer,
+                    self.commands,
+                    ask=self.ask if self.interactive else None,
+                    run=self.run_turn,
+                )
                 await self.commands.run(ctx, line)
                 if ctx.exit_requested:
                     return
@@ -106,7 +124,15 @@ class InlineUI:
             )
             await self.run_turn(self.app.submit(line))
 
-    async def run_turn(self, turn: Coroutine[Any, Any, None]) -> None:
+    async def ask(self, prompt: str) -> str | None:
+        """A one-line answer for a command (e.g. /undo's choice); None if cancelled."""
+        session: PromptSession[str] = PromptSession()
+        try:
+            return await session.prompt_async(prompt)
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    async def run_turn(self, turn: Coroutine[Any, Any, Any]) -> None:
         """Run a turn with Ctrl+C (SIGINT) cancelling it, then give the terminal back."""
         task = asyncio.create_task(turn)
         loop = asyncio.get_running_loop()

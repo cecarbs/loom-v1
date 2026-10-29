@@ -110,6 +110,11 @@ class Renderer:
             case ev.KernelStatus(state, variables):
                 self.status.kernel_state = state
                 self.status.kernel_vars = variables
+            case ev.Compacted(before, after):
+                self.close()
+                self.console.print(
+                    Text(f"· Compacted: ~{before:,} → ~{after:,} tokens", style="dim")
+                )
             case ev.Notice(text):
                 self.close()
                 self.console.print(Text(f"· {text}", style="yellow"))

@@ -105,6 +105,12 @@ class KernelStatus:
 
 
 @dataclass(frozen=True)
+class Compacted:
+    before_tokens: int  # estimates
+    after_tokens: int
+
+
+@dataclass(frozen=True)
 class Notice:
     text: str
 
@@ -143,6 +149,7 @@ AgentEvent = (
     | ToolCallFinished
     | ApprovalRequested
     | KernelStatus
+    | Compacted
     | Notice
     | ErrorEvent
     | UsageUpdated

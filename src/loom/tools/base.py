@@ -15,11 +15,12 @@ from pydantic import BaseModel, ValidationError
 from loom.broker.approval import Access, Approvals, denial_text
 from loom.broker.broker import ToolBroker
 from loom.broker.redact import Redactor
-from loom.core.events import EventBus, ToolCallFinished, ToolCallStarted
+from loom.core.events import EventBus, Notice, ToolCallFinished, ToolCallStarted
 from loom.core.messages import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
 from loom.kernel.client import KernelClient
 from loom.providers.base import INVALID_JSON_KEY, ToolSchema
 from loom.sandbox.base import SandboxBackend
+from loom.session.checkpoints import CheckpointError, Checkpoints
 from loom.session.store import SessionLog
 from loom.tools.budget import OutputBudget
 from loom.tools.paths import PathPolicy, ReadSet
@@ -50,6 +51,7 @@ class ToolContext:
     kernel: KernelClient | None = None
     broker: ToolBroker | None = None
     workspace_writable: bool = True
+    checkpoints: Checkpoints | None = None
 
 
 class Tool(Protocol):
@@ -71,6 +73,8 @@ class GatedTool(Tool, Protocol):
 
 # Consecutive calls to these tools may run concurrently.
 CONCURRENT_TOOLS = frozenset({"read"})
+# The first of these in a turn takes a checkpoint first (docs/07 "Checkpoints and undo").
+MUTATING_TOOLS = frozenset({"write", "edit", "bash", "execute"})
 
 
 class ToolSet:
@@ -183,7 +187,19 @@ class ToolSet:
                 decision = await approvals.check(call.name, access(args, ctx), call_id=call.id)
                 if not decision.allowed:
                     return ToolResult(denial_text(call.name, decision, approvals.mode), True)
+            if call.name in MUTATING_TOOLS:
+                await self._checkpoint(ctx)
             return await tool.run(args, ctx)
         except Exception as e:  # a tool bug must not end the turn
             log.exception("tool %s failed", call.name)
             return ToolResult(f"{call.name} failed: {type(e).__name__}: {e}", True)
+
+    async def _checkpoint(self, ctx: ToolContext) -> None:
+        """A failed snapshot doesn't block the tool; the user is told undo won't cover it."""
+        if ctx.checkpoints is None or not ctx.workspace_writable:
+            return
+        try:
+            await ctx.checkpoints.ensure()
+        except (CheckpointError, OSError) as e:
+            self._log.append("error", text=f"checkpoint: {e}")
+            await self._bus.emit(Notice(f"Checkpoint failed ({e}); /undo won't cover this turn."))

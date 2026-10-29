@@ -1,5 +1,26 @@
 # Changelog
 
+## M6 — Sessions, compaction, checkpoints
+
+- Resume: `loom -c`, `loom --resume <id|prefix>`, `/resume`, `/sessions`, `loom sessions`.
+  History is rebuilt from `message` + `compaction` entries (identical to the live history), plus
+  turns, usage, cost, checkpoints and undelivered notes; the session's last model is used unless
+  `--model`. A pid lock file stops two looms from using one session. If the kernel was used, the
+  next prompt says it is fresh.
+- Compaction (`loom.core.compaction`): auto at `compact_at` (reported prompt tokens + estimate of
+  newer messages), on `context_too_long` (then one retry), and `/compact [instructions]`. Keeps
+  the last `keep_recent_turns` turns byte-identical, never splits tool pairs, falls back to a
+  mid-turn cut in one long turn, appends the kernel inventory, logs the summary message.
+  `Compacted` event.
+- Checkpoints (`loom.session.checkpoints`): shadow git repo per project under
+  `~/.loom/checkpoints`, per-session index and ref, one snapshot before the first mutating tool
+  of a turn; `.gitignore` + defaults + >5 MB files excluded. `/undo [n]` restores changed files,
+  removes created ones, checkpoints "before /undo" first, and tells the model via a logged
+  `note`.
+- New log kinds: `session_resume`, `checkpoint`, `undo`, `note`; `model_request` gains `purpose`
+  and `cost_usd`.
+- Not restored on resume (by design): session approval grants, the read set.
+
 ## M5 — Sandboxes
 
 - Decision (owner): **`docker` is the default backend**. If Docker isn't running or the image

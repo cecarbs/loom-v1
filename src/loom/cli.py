@@ -13,7 +13,7 @@ from typing import Any, get_args
 from loom import __version__
 from loom.config import ApprovalMode, ConfigError, LoomConfig, SandboxBackendName, load_config
 from loom.sandbox.base import SandboxUnavailable
-from loom.session.store import loom_home
+from loom.session.store import SessionError, loom_home
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,7 +25,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", metavar="ALIAS", help="model alias to use")
     parser.add_argument("--mode", choices=get_args(ApprovalMode), help="approval mode")
     parser.add_argument("--sandbox", choices=get_args(SandboxBackendName), help="sandbox backend")
+    resume = parser.add_mutually_exclusive_group()
+    resume.add_argument(
+        "-c", "--continue", dest="continue_", action="store_true", help="resume the latest session"
+    )
+    resume.add_argument("--resume", metavar="ID", help="resume a session (id or unique prefix)")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    commands.add_parser("sessions", help="list sessions for this directory")
 
     secrets = commands.add_parser("secrets", help="manage secrets in the macOS Keychain")
     secrets_cmd = secrets.add_subparsers(dest="action", required=True)
@@ -65,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         return secrets_command(args.action, getattr(args, "name", None))
     if args.command == "tools":
         return tools_command()
+    if args.command == "sessions":
+        return sessions_command()
     try:
         loaded = load_config(Path.cwd().resolve(), cli=cli_overrides(args))
     except ConfigError as e:
@@ -79,8 +88,15 @@ def main(argv: list[str] | None = None) -> int:
             return setup_docker(loaded.config.sandbox)
         return setup_seatbelt(loaded.config.sandbox, loom_home())
     try:
-        asyncio.run(_interactive(loaded.config))
-    except SandboxUnavailable as e:
+        asyncio.run(
+            _interactive(
+                loaded.config,
+                model=args.model,
+                resume=args.resume,
+                resume_latest=args.continue_,
+            )
+        )
+    except (SandboxUnavailable, SessionError) as e:
         print(f"loom: {e}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
@@ -142,11 +158,32 @@ def tools_command() -> int:
     return 0
 
 
-async def _interactive(config: LoomConfig) -> None:
+def sessions_command() -> int:
+    from rich.console import Console
+
+    from loom.session.store import list_sessions
+    from loom.tui.commands import session_table
+
+    sessions = list_sessions(Path.cwd().resolve())
+    if not sessions:
+        print("No sessions in this directory.")
+        return 0
+    Console(highlight=False).print(session_table(sessions))
+    print("Resume with: loom --resume <id>   (or loom -c for the latest)")
+    return 0
+
+
+async def _interactive(
+    config: LoomConfig,
+    *,
+    model: str | None = None,
+    resume: str | None = None,
+    resume_latest: bool = False,
+) -> None:
     from loom.app import App
     from loom.tui.app import InlineUI
 
-    app = App(Path.cwd().resolve(), config)
+    app = App(Path.cwd().resolve(), config, model=model, resume=resume, resume_latest=resume_latest)
     await app.start()
     try:
         await InlineUI(app).run()

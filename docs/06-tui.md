@@ -90,9 +90,9 @@ Single-key answer via a short prompt_toolkit key-binding app. Calls `bus.respond
 | `/mode [read-only\|ask\|auto-write\|yolo]` | approval mode (kept for later sessions; not saved to config) |
 | `/kernel`, `/kernel reset` | inventory; restart kernel |
 | `/tools [query]` | browse tool catalog |
-| `/compact [instructions]` | manual compaction |
-| `/undo` | restore files to the previous checkpoint |
-| `/sessions`, `/resume <id>` | list / switch sessions |
+| `/compact [instructions]` | manual compaction (Ctrl+C cancels it; history is then unchanged) |
+| `/undo [n]` | list this session's checkpoints whose turn changed files (newest = 1) and ask which to restore (Enter = 1); `/undo n` restores directly, and is the only form when there's no terminal to ask on |
+| `/sessions`, `/resume <id>` | list / switch sessions (`<id>` may be a unique prefix); resuming prints a short recap |
 | `/trace [n]` | show the last n tool/kernel calls with timing |
 | `/cost` | token usage and cost |
 | `/clear` | start a new session (same workspace) |

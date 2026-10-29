@@ -154,7 +154,7 @@ Unknown keys are a config error (pydantic `extra="forbid"`) so typos are caught 
 ```
 loom                         start in cwd
 loom -p "prompt"             one-shot, print final answer, exit (non-interactive; approvals → deny unless --mode allows)
-loom -c | --resume <id>      resume latest / specific session
+loom -c | --resume <id>      resume latest / specific session (id or unique prefix; the session's last model unless --model)
 loom --model <alias>
 loom --mode <mode>
 loom --sandbox <backend>

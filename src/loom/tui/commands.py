@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import get_args
+from typing import Any, get_args
 
 from rich.console import Console
 from rich.table import Table
@@ -13,7 +13,12 @@ from rich.text import Text
 
 from loom.app import App
 from loom.config import ApprovalMode
+from loom.session.checkpoints import UndoEntry
+from loom.session.store import SessionError, SessionSummary
 from loom.tui.render import Renderer, format_cost
+
+Ask = Callable[[str], Awaitable[str | None]]  # prompt → answer (None: cancelled)
+Runner = Callable[[Coroutine[Any, Any, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -23,6 +28,8 @@ class CommandContext:
     renderer: Renderer
     commands: CommandRegistry
     exit_requested: bool = False
+    ask: Ask | None = None  # None when there's no terminal to ask on
+    run: Runner | None = None  # runs cancellable work (Ctrl+C) the way a turn runs
 
 
 Handler = Callable[[CommandContext, str], Awaitable[None] | None]
@@ -121,9 +128,138 @@ def _cost(ctx: CommandContext, args: str) -> None:
 
 async def _clear(ctx: CommandContext, args: str) -> None:
     session_id = await ctx.app.new_session()
-    ctx.renderer.status.context_pct = 0.0
-    ctx.renderer.status.cost_usd = ctx.app.agent.cost_usd
+    sync_status(ctx)
     ctx.console.print(Text(f"New session {session_id}", style="dim"))
+
+
+def sync_status(ctx: CommandContext) -> None:
+    agent = ctx.app.agent
+    ctx.renderer.status.context_pct = agent.context_pct if agent.history else 0.0
+    ctx.renderer.status.cost_usd = agent.cost_usd
+
+
+def _sessions(ctx: CommandContext, args: str) -> None:
+    sessions = ctx.app.sessions()
+    if not sessions:
+        ctx.console.print(Text("No sessions in this workspace.", style="dim"))
+        return
+    ctx.console.print(session_table(sessions[:20], current=ctx.app.session_id))
+    if len(sessions) > 20:
+        ctx.console.print(Text(f"… and {len(sessions) - 20} older", style="dim"))
+    ctx.console.print(Text("Switch with /resume <id> (a unique prefix is enough).", style="dim"))
+
+
+def session_table(sessions: list[SessionSummary], current: str | None = None) -> Table:
+    table = Table(box=None, padding=(0, 2), show_edge=False)
+    table.add_column("session", style="bold")
+    table.add_column("last active", style="cyan")
+    table.add_column("model", style="dim")
+    table.add_column("first prompt", no_wrap=True, overflow="ellipsis")
+    for s in sessions:
+        marker = " *" if s.id == current else ""
+        title = Text(s.title) if s.title else Text("(no prompts)", style="dim")
+        table.add_row(s.id + marker, f"{s.modified:%Y-%m-%d %H:%M}", s.model or "?", title)
+    return table
+
+
+async def _resume(ctx: CommandContext, args: str) -> None:
+    if not args:
+        _sessions(ctx, args)
+        return
+    try:
+        await ctx.app.resume(args)
+    except SessionError as e:
+        ctx.console.print(Text(str(e), style="red"))
+        return
+    sync_status(ctx)
+    print_resumed(ctx.console, ctx.app)
+
+
+def print_resumed(console: Console, app: App) -> None:
+    """A short recap: the last few prompts and the final reply."""
+    history = app.agent.history
+    console.print(
+        Text(
+            f"Resumed session {app.session_id} · {app.agent.turns} "
+            f"turn{'' if app.agent.turns == 1 else 's'}",
+            style="bold",
+        )
+    )
+    prompts = [m for m in history if m.role == "user" and m.text() and not m.meta.get("compaction")]
+    if any(m.meta.get("compaction") for m in history):
+        console.print(Text("  (earlier turns are compacted into a summary)", style="dim"))
+    for msg in prompts[-3:]:
+        line = msg.text().strip().splitlines()[0] if msg.text().strip() else ""
+        console.print(Text(f"  > {line[:100]}", style="dim"))
+    replies = [m for m in history if m.role == "assistant" and m.text().strip()]
+    if replies:
+        lines = replies[-1].text().strip().splitlines()
+        shown = "\n".join(lines[:12]) + ("\n…" if len(lines) > 12 else "")
+        console.print(Text(shown), soft_wrap=True)
+    if app.kernel.state == "off" and any(
+        m.role == "assistant" and any(b.name == "execute" for b in m.tool_uses()) for m in history
+    ):
+        console.print(Text("The kernel starts fresh: earlier variables are gone.", style="dim"))
+
+
+async def _compact(ctx: CommandContext, args: str) -> None:
+    work = ctx.app.compact(args)
+    if ctx.run is not None:
+        await ctx.run(work)
+    else:
+        await work
+    sync_status(ctx)
+
+
+async def _undo(ctx: CommandContext, args: str) -> None:
+    entries = await ctx.app.undo_entries()
+    if not entries:
+        ctx.console.print(Text("No file changes to undo in this session.", style="dim"))
+        return
+    if not args:
+        ctx.console.print(undo_table(entries[:10]))
+        if ctx.ask is None:
+            ctx.console.print(Text("Restore one with /undo <n>.", style="dim"))
+            return
+        shown = min(len(entries), 10)
+        answer = await ctx.ask(f"Restore files to which checkpoint? [1-{shown}, Enter = 1] ")
+        if answer is None:
+            ctx.console.print(Text("Cancelled.", style="dim"))
+            return
+        args = answer.strip() or "1"
+    if not args.isdigit() or not 1 <= int(args) <= len(entries):
+        ctx.console.print(Text(f"Pick a checkpoint between 1 and {len(entries)}.", style="red"))
+        return
+    entry = entries[int(args) - 1]
+    result = await ctx.app.undo(entry)
+    ctx.console.print(
+        f"Restored files to before turn {entry.checkpoint.turn}: "
+        f"{len(result.restored)} restored, {len(result.removed)} removed."
+    )
+    ctx.console.print(
+        Text(
+            "Undo covers workspace files only, not kernel variables or external systems. "
+            "/undo again can revert this.",
+            style="dim",
+        )
+    )
+
+
+CHANGE_WORDS = {"A": "new", "M": "edited", "D": "deleted"}
+
+
+def undo_table(entries: list[UndoEntry]) -> Table:
+    table = Table(box=None, padding=(0, 2), show_edge=False)
+    table.add_column("#", style="bold", justify="right")
+    table.add_column("before", style="cyan")
+    table.add_column("prompt")
+    table.add_column("changed", style="dim")
+    for i, entry in enumerate(entries, 1):
+        cp = entry.checkpoint
+        paths = [f"{c.path} ({CHANGE_WORDS.get(c.status, 'changed')})" for c in entry.changes]
+        files = ", ".join(paths[:3]) + (f", +{len(paths) - 3} more" if len(paths) > 3 else "")
+        table.add_row(str(i), f"turn {cp.turn}", Text(cp.prompt), files)
+    return table
 
 
 async def _kernel(ctx: CommandContext, args: str) -> None:
@@ -190,6 +326,10 @@ BUILTINS = (
     Command("model", "show or switch the model", _model, "[alias]"),
     Command("cost", "token usage and cost for this session", _cost),
     Command("clear", "start a new session in this workspace", _clear),
+    Command("sessions", "list this workspace's sessions", _sessions),
+    Command("resume", "switch to another session", _resume, "<id>"),
+    Command("compact", "summarize older messages to free context", _compact, "[instructions]"),
+    Command("undo", "restore files to a checkpoint", _undo, "[n]"),
     Command("kernel", "show kernel variables, or restart it", _kernel, "[reset]"),
     Command("tools", "browse kernel tool functions", _tools, "[query]"),
     Command("mode", "show or set the approval mode", _mode, "[read-only|ask|auto-write|yolo]"),
