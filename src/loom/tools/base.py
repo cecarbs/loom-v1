@@ -161,16 +161,16 @@ class ToolSet:
         return ToolResultBlock(call.id, content, result.is_error)
 
     async def _execute(self, call: ToolUseBlock, ctx: ToolContext) -> ToolResult:
-        tool = self._tools.get(call.name)
-        if tool is None:
-            return ToolResult(
-                f"Unknown tool {call.name!r}. Available tools: {', '.join(self._tools)}.", True
-            )
-        if INVALID_JSON_KEY in call.input:
+        if INVALID_JSON_KEY in call.input:  # first: the name may be unreadable too
             return ToolResult(
                 "The tool call arguments were not valid JSON. Resend the call with a valid JSON "
                 "object.",
                 True,
+            )
+        tool = self._tools.get(call.name)
+        if tool is None:
+            return ToolResult(
+                f"Unknown tool {call.name!r}. Available tools: {', '.join(self._tools)}.", True
             )
         try:
             args = tool.input_model.model_validate(call.input)

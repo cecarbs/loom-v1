@@ -231,6 +231,8 @@ def test_unknown_key_is_error_naming_the_file(workspace: Path, user_path: Path) 
 def test_extra_body_reserved_keys_rejected(workspace: Path, user_path: Path) -> None:
     with pytest.raises(ConfigError, match="may not set keys loom controls: messages"):
         load(workspace, user_path, user=LOCAL_MODEL + "[models.local.extra_body]\nmessages = []\n")
+    with pytest.raises(ConfigError, match="input"):  # the Responses API's `messages`
+        load(workspace, user_path, user=LOCAL_MODEL + "[models.local.extra_body]\ninput = []\n")
 
 
 def test_invalid_toml_is_error(workspace: Path, user_path: Path) -> None:

@@ -145,7 +145,7 @@ log_tool_results = false
 | `thinking` | table | none (provider default) | `effort` (`low`/`medium`/`high`/`xhigh`/`max`) or, for older models only, `budget_tokens`; ignored with a notice if `capabilities.thinking` is false |
 | `pricing` | table | built-in profile, else none | `input`, `output`, `cache_read`, `cache_write` in USD per MTok; none → cost shown as `—` |
 | `headers` | table | {} | Values may be `"secret:<name>"` |
-| `extra_body` | table | {} | Merged into the request body; may not set `model`, `messages`, `tools`, `stream` |
+| `extra_body` | table | {} | Merged into the request body; may not set `model`, `messages`, `tools`, `stream`, `system`, `input`, `instructions` |
 
 Unknown keys are a config error (pydantic `extra="forbid"`) so typos are caught early.
 
@@ -160,7 +160,7 @@ loom --mode <mode>
 loom --sandbox <backend>
 loom sandbox setup [--docker]
 loom secrets set|list|delete <name>
-loom models list             configured models with resolved capabilities
+loom models list             configured models (built-in: sonnet, opus, haiku) with resolved capabilities
 loom models test <alias>     probe a model: reply, tool call, image; suggests capability settings
 loom tools list              show catalog (installed `loom.tools` entry points)
 loom trace <session-id>

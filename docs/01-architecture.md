@@ -144,6 +144,7 @@ loom/
       openai_responses.py
       profiles.py       # ModelProfile, ModelCapabilities, built-in defaults
       text_tools.py     # text tool-call fallback for models without native tools
+      probe.py          # `loom models test` capability probes
       fake.py           # FakeProvider for tests
       registry.py
     tools/

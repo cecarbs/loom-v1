@@ -26,7 +26,7 @@ from loom.core.mentions import expand_mentions
 from loom.kernel.client import ExecClock, KernelClient
 from loom.kernel.protocol import VarInfo
 from loom.providers.base import Provider
-from loom.providers.profiles import ModelProfile, resolve_profile
+from loom.providers.profiles import ModelProfile, profile_notices, resolve_profile
 from loom.providers.registry import create_provider
 from loom.sandbox.base import SandboxBackend, SessionInfo, create_backend, sandbox_env
 from loom.session.checkpoints import Checkpoint, Checkpoints, UndoEntry, UndoResult
@@ -221,6 +221,7 @@ class App:
             paths = find_session(workspace, resume, home)
         self.resumed = paths is not None
         self.agent = self._build(model, paths)
+        self.notices.extend(profile_notices(self.agent.profile))
 
     def _build(self, alias: str | None, resume: SessionPaths | None = None) -> AgentLoop:
         """`alias` None: the resumed session's model, else the default."""

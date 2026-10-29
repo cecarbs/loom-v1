@@ -1,0 +1,98 @@
+{
+  "model": "gpt-test",
+  "messages": [
+    {
+      "role": "system",
+      "content": "SYS"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "look at a.txt and this"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,AAAA"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Reading both.",
+      "tool_calls": [
+        {
+          "id": "t1",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"path\": \"a.txt\"}"
+          }
+        },
+        {
+          "id": "t2",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"path\": \"b.png\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "t1",
+      "content": "[error] no such file"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "t2",
+      "content": "b.png:"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,BBBB"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "a.txt is missing; b.png is red."
+    },
+    {
+      "role": "user",
+      "content": "thanks"
+    }
+  ],
+  "max_tokens": 1000,
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "reasoning_effort": "medium"
+}

@@ -1,5 +1,24 @@
 # Changelog
 
+## M7 — More providers, model profiles, capabilities
+
+- `openai_responses` adapter: stateless (`store=false`), `function_call` / `function_call_output`
+  items, encrypted reasoning items kept as `ThinkingBlock`s and replayed only to this adapter,
+  tool-result images inline, `instructions` / developer / user system role, error events mapped.
+- Text tool-call fallback (`providers/text_tools.py`) as a wrapper around any adapter when
+  `tools = false`; history stays canonical. Malformed JSON is now checked before the tool name,
+  so it gets the "resend valid JSON" error.
+- Capability shaping: no thinking config at all when `thinking = false` (notice at start and on
+  `/model`); `streaming = false` makes plain calls (OpenAI adapters; Anthropic always streams);
+  `verify_tls` / `ca_bundle` wired into both SDK clients.
+- Built-in aliases `opus` (`claude-opus-5-5`) and `haiku` (`claude-haiku-5-5`) with pricing from
+  Anthropic's model table; `openai_responses` defaults to `images = true`.
+- `extra_body` also may not set `system`, `input`, `instructions`.
+- `loom models list` and `loom models test <alias>` (reply / tool call / image probes, suggested
+  capability lines).
+- Golden JSON request tests for all three adapters (`tests/fixtures/golden/`, regenerate with
+  `LOOM_UPDATE_GOLDEN=1`).
+
 ## M6 — Sessions, compaction, checkpoints
 
 - Resume: `loom -c`, `loom --resume <id|prefix>`, `/resume`, `/sessions`, `loom sessions`.

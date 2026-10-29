@@ -1,0 +1,106 @@
+{
+  "model": "gpt-test",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "look at a.txt and this"
+        },
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,AAAA",
+          "detail": "auto"
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_1",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "plan"
+        }
+      ],
+      "encrypted_content": "ENC"
+    },
+    {
+      "role": "assistant",
+      "content": "Reading both."
+    },
+    {
+      "type": "function_call",
+      "call_id": "t1",
+      "name": "read",
+      "arguments": "{\"path\": \"a.txt\"}"
+    },
+    {
+      "type": "function_call",
+      "call_id": "t2",
+      "name": "read",
+      "arguments": "{\"path\": \"b.png\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "t1",
+      "output": "[error] no such file"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "t2",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "b.png:"
+        },
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,BBBB",
+          "detail": "auto"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "a.txt is missing; b.png is red."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "thanks"
+        }
+      ]
+    }
+  ],
+  "max_output_tokens": 1000,
+  "store": false,
+  "stream": true,
+  "instructions": "SYS",
+  "tools": [
+    {
+      "type": "function",
+      "name": "read",
+      "description": "Read a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "strict": false
+    }
+  ],
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "reasoning": {
+    "effort": "medium",
+    "summary": "auto"
+  }
+}

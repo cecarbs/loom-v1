@@ -19,11 +19,13 @@ SandboxBackendName = Literal["none", "seatbelt", "docker"]
 NetworkMode = Literal["none", "allowlist"]
 OverrideDecision = Literal["allow", "ask", "deny"]
 
-# Built-in model aliases. Full profiles move to loom.providers.profiles in M1.
-BUILTIN_MODEL_ALIASES = frozenset({"sonnet"})
+# Built-in model aliases; the profiles live in loom.providers.profiles.
+BUILTIN_MODEL_ALIASES = frozenset({"sonnet", "opus", "haiku"})
 
-# Request-body keys loom sets itself; extra_body may not override them.
-RESERVED_BODY_KEYS = frozenset({"model", "messages", "tools", "stream"})
+# Request-body keys loom sets itself in some adapter; extra_body may not override them.
+RESERVED_BODY_KEYS = frozenset(
+    {"model", "messages", "tools", "stream", "system", "input", "instructions"}
+)
 
 # Strictness ranks for tighten-only keys (higher = stricter).
 _APPROVAL_RANK: dict[str, int] = {"yolo": 0, "auto-write": 1, "ask": 2, "read-only": 3}

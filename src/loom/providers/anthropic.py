@@ -24,6 +24,7 @@ from loom.providers.base import (
     ModelRequest,
     ProviderError,
     ProviderEvent,
+    ProviderSetupError,
     TextDelta,
     ThinkingDelta,
     ToolUseEnd,
@@ -32,6 +33,7 @@ from loom.providers.base import (
     api_key_for,
     estimate_tokens,
     resolve_headers,
+    tls_verify,
     without_images,
 )
 from loom.providers.profiles import ModelProfile
@@ -64,6 +66,8 @@ class AnthropicProvider:
                 "default_headers": resolve_headers(self.profile.headers, self._secrets) or None,
                 "http_client": self._http_client,
             }
+            if self._http_client is None and (verify := tls_verify(self.profile)) is not True:
+                kwargs["http_client"] = anthropic.DefaultAsyncHttpxClient(verify=verify)
             # Without a configured secret, the SDK's own chain applies (ANTHROPIC_API_KEY,
             # `ant auth login` profiles, ...).
             if api_key := api_key_for(self.profile, self._secrets):
@@ -94,7 +98,9 @@ class AnthropicProvider:
                             yield ToolUseInputDelta(tool_ids[event.index], delta.partial_json)
                 final = await stream.get_final_message()
         except Exception as e:  # SDK and transport errors become ProviderErrors
-            if not isinstance(e, anthropic.AnthropicError | httpx2.HTTPError | LookupError):
+            if not isinstance(
+                e, anthropic.AnthropicError | httpx2.HTTPError | LookupError | ProviderSetupError
+            ):
                 raise
             yield map_error(e)
             return
@@ -207,6 +213,8 @@ def usage_from(usage: Any) -> Usage:
 
 def map_error(e: Exception) -> ProviderError:
     message = getattr(e, "message", None) or str(e)
+    if isinstance(e, ProviderSetupError):
+        return ProviderError("other", message)
     if isinstance(e, anthropic.RateLimitError):
         return ProviderError("rate_limit", message, _retry_after(e))
     if isinstance(

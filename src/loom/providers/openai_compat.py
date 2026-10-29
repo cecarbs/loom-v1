@@ -1,7 +1,7 @@
 """OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, Ollama, vLLM, ...).
 
-M1 core: streaming text and tool calls, tool messages, base_url / extra_body / timeout_s.
-Capability shaping beyond images/system_role/parallel calls arrives in M7.
+Streaming (or, with `streaming = false`, one plain call) text and tool calls; tool results
+become `role=tool` messages; other providers' thinking blocks are never replayed. See docs/02.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from loom.providers.base import (
     ModelRequest,
     ProviderError,
     ProviderEvent,
+    ProviderSetupError,
     TextDelta,
     ThinkingDelta,
     ToolUseEnd,
@@ -40,6 +41,7 @@ from loom.providers.base import (
     estimate_tokens,
     image_notice,
     resolve_headers,
+    tls_verify,
 )
 from loom.providers.profiles import ModelCapabilities, ModelProfile
 
@@ -63,17 +65,7 @@ class OpenAICompatProvider:
 
     def _get_client(self) -> openai.AsyncOpenAI:
         if self._client is None:
-            api_key = api_key_for(self.profile, self._secrets)
-            if api_key is None and self.profile.base_url is None:
-                api_key = os.environ.get("OPENAI_API_KEY")  # only for the official endpoint
-            self._client = openai.AsyncOpenAI(
-                api_key=api_key or "no-key",  # local servers ignore it; the SDK requires one
-                base_url=self.profile.base_url,
-                timeout=self.profile.timeout_s,
-                max_retries=0,
-                default_headers=resolve_headers(self.profile.headers, self._secrets) or None,
-                http_client=self._http_client,
-            )
+            self._client = make_client(self.profile, self._secrets, self._http_client)
         return self._client
 
     async def stream(self, req: ModelRequest) -> AsyncIterator[ProviderEvent]:
@@ -87,25 +79,28 @@ class OpenAICompatProvider:
             response = await client.chat.completions.create(
                 **params, extra_body=self.profile.extra_body or None
             )
-            async for chunk in response:
+            # Without streaming the whole reply arrives at once; its message has the same
+            # fields as a stream delta, so it goes through the same accumulation.
+            chunks = _stream_chunks(response) if params["stream"] else _single(response)
+            async for chunk in chunks:
                 if chunk.usage:
                     usage = _usage(chunk.usage)
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
-                delta = choice.delta
+                delta = choice.delta if params["stream"] else choice.message
                 if reasoning := _reasoning(delta):
                     yield ThinkingDelta(reasoning)
                 if delta.content:
                     text.append(delta.content)
                     yield TextDelta(delta.content)
-                for tc in delta.tool_calls or []:
-                    for event in _accumulate(calls, tc):
+                for index, tc in enumerate(delta.tool_calls or []):
+                    for event in _accumulate(calls, tc, index):
                         yield event
                 if choice.finish_reason:
                     finish = choice.finish_reason
         except Exception as e:
-            if not isinstance(e, openai.OpenAIError | httpx2.HTTPError | LookupError):
+            if not isinstance(e, CLIENT_ERRORS):
                 raise
             yield map_error(e, self.profile.base_url)
             return
@@ -115,7 +110,7 @@ class OpenAICompatProvider:
             content.append(TextBlock(joined))
         for index in sorted(calls):
             call = calls[index]
-            tool_use = ToolUseBlock(call["id"], call["name"], _parse_args(call["args"]))
+            tool_use = ToolUseBlock(call["id"], call["name"], parse_args(call["args"]))
             content.append(tool_use)
             yield ToolUseEnd(tool_use.id, tool_use.input)
         if calls and finish == "stop":
@@ -128,6 +123,40 @@ class OpenAICompatProvider:
         return estimate_tokens(messages)
 
 
+# Errors that become a ProviderError instead of propagating.
+CLIENT_ERRORS = (openai.OpenAIError, httpx2.HTTPError, LookupError, ProviderSetupError)
+
+
+def make_client(
+    profile: ModelProfile, secrets: SecretStore, http_client: httpx2.AsyncClient | None
+) -> openai.AsyncOpenAI:
+    """Client for both OpenAI adapters: key, headers (`secret:` resolved), timeout, TLS."""
+    api_key = api_key_for(profile, secrets)
+    if api_key is None and profile.base_url is None:
+        api_key = os.environ.get("OPENAI_API_KEY")  # only for the official endpoint
+    if http_client is None:
+        verify = tls_verify(profile)
+        if verify is not True:
+            http_client = openai.DefaultAsyncHttpxClient(verify=verify)
+    return openai.AsyncOpenAI(
+        api_key=api_key or "no-key",  # local servers ignore it; the SDK requires one
+        base_url=profile.base_url,
+        timeout=profile.timeout_s,
+        max_retries=0,  # the agent loop owns retries
+        default_headers=resolve_headers(profile.headers, secrets) or None,
+        http_client=http_client,
+    )
+
+
+async def _stream_chunks(response: Any) -> AsyncIterator[Any]:
+    async for chunk in response:
+        yield chunk
+
+
+async def _single(response: Any) -> AsyncIterator[Any]:
+    yield response
+
+
 # --- request ---------------------------------------------------------------
 
 
@@ -137,9 +166,10 @@ def build_params(req: ModelRequest, profile: ModelProfile) -> dict[str, Any]:
         "model": req.model,
         "messages": to_openai(req.system, req.messages, caps),
         "max_tokens": req.max_tokens,
-        "stream": True,
-        "stream_options": {"include_usage": True},
+        "stream": caps.streaming,
     }
+    if caps.streaming:
+        params["stream_options"] = {"include_usage": True}
     if req.tools:
         params["tools"] = [
             {
@@ -236,9 +266,12 @@ def _dump_args(args: dict[str, Any]) -> str:
 # --- response --------------------------------------------------------------
 
 
-def _accumulate(calls: dict[int, dict[str, Any]], tc: Any) -> list[ProviderEvent]:
+def _accumulate(calls: dict[int, dict[str, Any]], tc: Any, position: int) -> list[ProviderEvent]:
+    """Stream deltas carry an `index`; a complete (non-streamed) message's calls don't."""
     events: list[ProviderEvent] = []
-    call = calls.setdefault(tc.index, {"id": None, "name": "", "args": "", "started": False})
+    index = getattr(tc, "index", None)
+    key = position if index is None else index
+    call = calls.setdefault(key, {"id": None, "name": "", "args": "", "started": False})
     if tc.id:
         call["id"] = tc.id
     fn = tc.function
@@ -255,7 +288,7 @@ def _accumulate(calls: dict[int, dict[str, Any]], tc: Any) -> list[ProviderEvent
     return events
 
 
-def _parse_args(raw: str) -> dict[str, Any]:
+def parse_args(raw: str) -> dict[str, Any]:
     if not raw.strip():
         return {}
     try:
@@ -285,6 +318,8 @@ def _usage(usage: Any) -> Usage:
 
 def map_error(e: Exception, base_url: str | None) -> ProviderError:
     message = getattr(e, "message", None) or str(e)
+    if isinstance(e, ProviderSetupError):
+        return ProviderError("other", message)
     if isinstance(e, openai.RateLimitError):
         return ProviderError("rate_limit", message, _retry_after(e))
     if isinstance(e, openai.InternalServerError):

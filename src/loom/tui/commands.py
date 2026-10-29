@@ -13,6 +13,7 @@ from rich.text import Text
 
 from loom.app import App
 from loom.config import ApprovalMode
+from loom.providers.profiles import profile_notices
 from loom.session.checkpoints import UndoEntry
 from loom.session.store import SessionError, SessionSummary
 from loom.tui.render import Renderer, format_cost
@@ -110,6 +111,8 @@ def _model(ctx: CommandContext, args: str) -> None:
         return
     ctx.renderer.status.cost_usd = app.agent.cost_usd
     ctx.console.print(f"Switched to [bold]{profile.alias}[/] ({profile.provider}: {profile.model})")
+    for notice in profile_notices(profile):
+        ctx.console.print(Text(notice, style="yellow"))
 
 
 def _cost(ctx: CommandContext, args: str) -> None:

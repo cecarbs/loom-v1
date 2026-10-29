@@ -1,0 +1,134 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1000,
+  "system": [
+    {
+      "type": "text",
+      "text": "SYS",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "look at a.txt and this"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "AAAA"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "hmm",
+          "signature": "sig1"
+        },
+        {
+          "type": "text",
+          "text": "Reading both."
+        },
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "read",
+          "input": {
+            "path": "a.txt"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "t2",
+          "name": "read",
+          "input": {
+            "path": "b.png"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "t1",
+          "content": "no such file",
+          "is_error": true
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "t2",
+          "content": [
+            {
+              "type": "text",
+              "text": "b.png:"
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "BBBB"
+              }
+            }
+          ],
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "a.txt is missing; b.png is red."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "thanks",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a file",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "thinking": {
+    "type": "adaptive",
+    "display": "summarized"
+  },
+  "output_config": {
+    "effort": "medium"
+  }
+}

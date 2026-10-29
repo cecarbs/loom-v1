@@ -48,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.add_argument("--docker", action="store_true", help="build the docker sandbox image")
 
+    models = commands.add_parser("models", help="configured models")
+    models_cmd = models.add_subparsers(dest="action", required=True)
+    models_cmd.add_parser("list", help="configured models with resolved capabilities")
+    test = models_cmd.add_parser(
+        "test", help="probe a model (reply, tool call, image) and suggest capability settings"
+    )
+    test.add_argument("alias")
+
     tools = commands.add_parser("tools", help="kernel tool packages")
     tools_cmd = tools.add_subparsers(dest="action", required=True)
     tools_cmd.add_parser("list", help="show the tool catalog")
@@ -81,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for notice in loaded.notices:
         print(f"loom: {notice}", file=sys.stderr)
+    if args.command == "models":
+        if args.action == "list":
+            return models_list(loaded.config)
+        return asyncio.run(models_test(loaded.config, args.alias))
     if args.command == "sandbox":
         from loom.sandbox.setup import setup_docker, setup_seatbelt
 
@@ -155,6 +167,67 @@ def tools_command() -> int:
         print(f"{package.name} — {package.description}")
         for spec in package.tools.values():
             print(f"  {spec.display()}")
+    return 0
+
+
+def models_list(config: LoomConfig) -> int:
+    from loom.providers.profiles import resolve_profile
+
+    short = {"parallel_tool_calls": "parallel", "prompt_cache": "cache"}
+    for alias in sorted(config.model_aliases()):
+        p = resolve_profile(alias, config)
+        caps = p.capabilities
+        flags = [
+            short.get(name, name)
+            for name in ("tools", "parallel_tool_calls", "images", "thinking", "prompt_cache")
+            if getattr(caps, name)
+        ]
+        if not caps.tools:
+            flags.insert(0, "text tool calls")
+        if not caps.streaming:
+            flags.append("no streaming")
+        if caps.system_role != "system":
+            flags.append(f"system_role={caps.system_role}")
+        price = (
+            f"${p.pricing.input:g} / ${p.pricing.output:g} per MTok"
+            if p.pricing
+            else "cost unknown"
+        )
+        marker = "*" if alias == config.default_model else " "
+        print(f"{marker} {alias:<10} {p.provider}: {p.model}")
+        print(f"  {'':<10} {p.context_window:,} context · {p.max_tokens:,} max out · {price}")
+        print(f"  {'':<10} {', '.join(flags)}")
+    print("* default. Probe a model with: loom models test <alias>")
+    return 0
+
+
+async def models_test(config: LoomConfig, alias: str) -> int:
+    from loom.broker.secrets import KeyringKeychain, SecretStore
+    from loom.providers.probe import probe_model, suggestions
+    from loom.providers.profiles import resolve_profile
+    from loom.providers.registry import create_provider
+
+    if alias not in config.model_aliases():
+        known = ", ".join(sorted(config.model_aliases()))
+        print(f"loom: unknown model alias {alias!r} (defined: {known})", file=sys.stderr)
+        return 2
+    profile = resolve_profile(alias, config)
+    secrets = SecretStore(keychain=KeyringKeychain())
+    print(f"Probing {alias} ({profile.provider}: {profile.model})…")
+    results = await probe_model(profile, lambda p: create_provider(p, secrets, text_tools=False))
+    for r in results:
+        mark = "✓" if r.ok else "✗"
+        timing = f"  ({r.seconds:.1f}s)" if r.seconds else ""
+        print(f"  {mark} {r.name:<16} {r.detail}{timing}")
+    if results[0].name == "reply" and not results[0].ok and len(results) == 1:
+        return 1
+    lines = suggestions(profile, results)
+    if lines:
+        print("\nSuggested config (~/.loom/config.toml):")
+        for line in lines:
+            print(f"  {line}")
+    else:
+        print("\nThe configured capabilities match what the model did.")
     return 0
 
 

@@ -65,10 +65,13 @@ class ModelProfile:
 PROVIDER_CAPABILITIES: dict[str, ModelCapabilities] = {
     "anthropic": ModelCapabilities(images=True, thinking=True, prompt_cache=True),
     "openai_compat": ModelCapabilities(),
+    "openai_responses": ModelCapabilities(images=True),
 }
 
-# Values from Anthropic's model table (2026-10): 1M context, 128K max output,
-# $2 / $10 per MTok, cache reads $0.20, 5-minute cache writes 1.25x input.
+# Values from Anthropic's model table (2026-10): 1M context and 128K max output for all three
+# (loom requests 64K); 5-minute cache writes cost 1.25x input. Haiku's prices are for prompts up
+# to 100K tokens (the higher tier beyond isn't modelled) and its cache-read price isn't
+# published in that table, so cache reads are counted at the input price.
 BUILTIN_PROFILES: dict[str, ModelProfile] = {
     "sonnet": ModelProfile(
         alias="sonnet",
@@ -79,12 +82,31 @@ BUILTIN_PROFILES: dict[str, ModelProfile] = {
         capabilities=PROVIDER_CAPABILITIES["anthropic"],
         pricing=Pricing(input=2.0, output=10.0, cache_read=0.20, cache_write=2.50),
     ),
+    "opus": ModelProfile(
+        alias="opus",
+        provider="anthropic",
+        model="claude-opus-5-5",
+        context_window=1_000_000,
+        max_tokens=64_000,
+        capabilities=PROVIDER_CAPABILITIES["anthropic"],
+        pricing=Pricing(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0),
+    ),
+    "haiku": ModelProfile(
+        alias="haiku",
+        provider="anthropic",
+        model="claude-haiku-5-5",
+        context_window=1_000_000,
+        max_tokens=64_000,
+        capabilities=PROVIDER_CAPABILITIES["anthropic"],
+        pricing=Pricing(input=0.10, output=0.50, cache_write=0.125),
+    ),
 }
 
 # Credential env vars the SDKs read when no secret is configured (docs/09).
 PROVIDER_KEY_ENV: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai_compat": "OPENAI_API_KEY",
+    "openai_responses": "OPENAI_API_KEY",
 }
 
 
@@ -131,3 +153,19 @@ def _with_provider_secret(profile: ModelProfile, config: LoomConfig) -> ModelPro
     if provider_entry and provider_entry.api_key_secret:
         return replace(profile, api_key_secret=provider_entry.api_key_secret)
     return profile
+
+
+def profile_notices(profile: ModelProfile) -> list[str]:
+    """Config the profile can't honour, told to the user once (docs/02 capability table)."""
+    notices: list[str] = []
+    if profile.thinking is not None and not profile.capabilities.thinking:
+        notices.append(
+            f"Model {profile.alias!r}: thinking is configured but capabilities.thinking is "
+            "false; no thinking setting will be sent."
+        )
+    if not profile.capabilities.tools:
+        notices.append(
+            f"Model {profile.alias!r} has no native tool calling; using the text tool-call "
+            "fallback."
+        )
+    return notices

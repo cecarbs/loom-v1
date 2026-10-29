@@ -62,5 +62,5 @@ class ContextBuilder:
             messages=list(history),
             tools=tools,
             max_tokens=self.profile.max_tokens,
-            thinking=self.profile.thinking,
+            thinking=self.profile.thinking if self.profile.capabilities.thinking else None,
         )

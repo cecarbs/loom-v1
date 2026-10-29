@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -149,6 +150,23 @@ def resolve_headers(headers: dict[str, str], secrets: SecretStore) -> dict[str, 
             value = secret
         resolved[key] = value
     return resolved
+
+
+class ProviderSetupError(Exception):
+    """The profile can't be turned into a working client (e.g. an unreadable ca_bundle)."""
+
+
+def tls_verify(profile: ModelProfile) -> bool | ssl.SSLContext:
+    """`verify` for the HTTP client: False, True (system CAs) or a context with `ca_bundle`."""
+    if not profile.verify_tls:
+        return False
+    if profile.ca_bundle is None:
+        return True
+    path = profile.ca_bundle.expanduser()
+    try:
+        return ssl.create_default_context(cafile=str(path))
+    except (OSError, ssl.SSLError) as e:
+        raise ProviderSetupError(f"ca_bundle {path}: {e}") from e
 
 
 def api_key_for(profile: ModelProfile, secrets: SecretStore) -> str | None:
