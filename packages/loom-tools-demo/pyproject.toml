@@ -1,0 +1,16 @@
+[project]
+name = "loom-tools-demo"
+version = "0.1.0"
+description = "Synthetic logs and tickets for trying loom's code mode"
+requires-python = ">=3.12"
+dependencies = ["loom"]
+
+[project.entry-points."loom.tools"]
+demo = "loom_tools_demo:package"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_tools_demo"]

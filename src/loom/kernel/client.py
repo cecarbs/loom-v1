@@ -10,7 +10,7 @@ import logging
 import shutil
 import signal
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,44 @@ STDERR_TAIL_CHARS = 4000
 OutputCallback = Callable[[str], Awaitable[None]]
 
 
+class ExecClock:
+    """An execution's timeout clock. It stops while paused (approval prompts), so time the
+    user spends deciding doesn't count against `timeout_s` (docs/04)."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self.timeout_s = timeout_s
+        self.changed = asyncio.Event()
+        self._used = 0.0
+        self._since = time.monotonic()
+        self._pauses = 0
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pauses > 0
+
+    def remaining(self) -> float:
+        running = 0.0 if self.is_paused else time.monotonic() - self._since
+        return self.timeout_s - self._used - running
+
+    @contextlib.contextmanager
+    def paused(self) -> Iterator[None]:
+        if self._pauses == 0:
+            self._used += time.monotonic() - self._since
+        self._pauses += 1
+        self.changed.set()
+        try:
+            yield
+        finally:
+            self._pauses -= 1
+            if self._pauses == 0:
+                self._since = time.monotonic()
+            self.changed.set()
+
+
+# (tool, args, call_id, clock) -> the `tool_result` message to send back
+ToolHandler = Callable[[str, object, str, ExecClock], Awaitable[dict[str, Any]]]
+
+
 class KernelDied(Exception):
     pass
 
@@ -47,6 +85,8 @@ class KernelClient:
         session_log: SessionLog,
         settings: Mapping[str, Any],
         workspace_writable: bool = True,
+        catalog: Sequence[Mapping[str, Any]] = (),
+        tool_handler: ToolHandler | None = None,
     ) -> None:
         self.backend = backend
         self.session = session
@@ -55,6 +95,8 @@ class KernelClient:
         self.log = session_log
         self.settings = dict(settings)
         self.workspace_writable = workspace_writable
+        self.catalog = [dict(entry) for entry in catalog]
+        self.tool_handler = tool_handler
 
         self.state: KernelState = "off"
         self.vars: int | None = None
@@ -71,6 +113,8 @@ class KernelClient:
         self._was_ready = False  # the current process got as far as `ready`
         self._expected_exit = False
         self._restart_pending = False  # a kernel with state died; tell the model next time
+        # The running execution: its id, clock and in-flight broker calls.
+        self._current: tuple[str, ExecClock, set[asyncio.Task[None]]] | None = None
 
     # --- lifecycle -------------------------------------------------------------------
 
@@ -109,7 +153,7 @@ class KernelClient:
         self._reader = asyncio.create_task(self._read(proc), name="kernel-reader")
         self._stderr_task = asyncio.create_task(self._drain_stderr(proc), name="kernel-stderr")
         try:
-            await self._send({"type": "init", "catalog": [], "settings": self.settings})
+            await self._send({"type": "init", "catalog": self.catalog, "settings": self.settings})
             ready = await asyncio.wait_for(self._ready, STARTUP_TIMEOUT_S)
         except (TimeoutError, KernelDied, ConnectionError) as e:
             await self._kill("startup failed")
@@ -182,10 +226,13 @@ class KernelClient:
             self._pending[exec_id] = future
             self._outputs[exec_id] = collect
             start = time.monotonic()
+            clock = ExecClock(timeout_s)
+            calls: set[asyncio.Task[None]] = set()
+            self._current = (exec_id, clock, calls)
             await self._set_state("busy")
             try:
                 await self._send({"type": "execute", "id": exec_id, "code": code})
-                msg = await asyncio.wait_for(asyncio.shield(future), timeout_s)
+                msg = await _wait(future, clock)
             except TimeoutError:
                 await self._kill(f"execute {exec_id} timed out after {timeout_s:g}s")
                 result = ExecutionResult(
@@ -200,6 +247,7 @@ class KernelClient:
                     restarted=restarted,
                 )
             except asyncio.CancelledError:
+                await self._abandon(calls)
                 await self._interrupt(future)
                 self.log.append("kernel_execute", id=exec_id, code=code, status="interrupted")
                 raise
@@ -207,6 +255,8 @@ class KernelClient:
                 result = ExecutionResult.from_message(msg, "".join(chunks), restarted)
                 self.vars = msg.get("vars", self.vars)
             finally:
+                self._current = None
+                await self._abandon(calls)
                 self._pending.pop(exec_id, None)
                 self._outputs.pop(exec_id, None)
                 if self.state == "busy":
@@ -222,6 +272,15 @@ class KernelClient:
                 restarted=restarted,
             )
             return result
+
+    async def _abandon(self, calls: set[asyncio.Task[None]]) -> None:
+        """Cancel broker calls of an execution that ended (a pending approval resolves as
+        deny, logged with by "cancel")."""
+        pending = [t for t in calls if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _interrupt(self, future: asyncio.Future[dict[str, Any]]) -> None:
         """SIGINT the runner and wait for its reply; kill it if none comes in time."""
@@ -297,12 +356,47 @@ class KernelClient:
                 text = msg.get("text")
                 if callback is not None and isinstance(text, str):
                     await callback(text)
+            case "tool_call":
+                await self._start_tool_call(msg)
             case "execute_result" | "inventory_result":
                 future = self._pending.get(str(msg.get("id")))
                 if future is not None and not future.done():
                     future.set_result(msg)
             case other:
                 log.warning("unexpected kernel message type %r", other)
+
+    async def _start_tool_call(self, msg: dict[str, Any]) -> None:
+        call_id = str(msg.get("call_id"))
+        current = self._current
+        if current is None or current[0] != msg.get("id") or self.tool_handler is None:
+            reason = (
+                "tools are not available in this kernel"
+                if self.tool_handler is None
+                else "tool calls only work while an execute call runs"
+            )
+            await self._reply(_tool_error(call_id, "ToolError", reason))
+            return
+        _, clock, calls = current
+        task = asyncio.create_task(self._tool_call(msg, call_id, clock), name=f"tool-{call_id}")
+        calls.add(task)
+        task.add_done_callback(calls.discard)
+
+    async def _tool_call(self, msg: dict[str, Any], call_id: str, clock: ExecClock) -> None:
+        assert self.tool_handler is not None
+        try:
+            reply = await self.tool_handler(str(msg.get("tool")), msg.get("args"), call_id, clock)
+        except asyncio.CancelledError:
+            # Threads in model code may still be waiting on this call; unblock them.
+            await self._reply(_tool_error(call_id, "ToolError", "cancelled: the execution ended"))
+            raise
+        except Exception as e:
+            log.exception("broker call %s failed", call_id)
+            reply = _tool_error(call_id, "ToolError", f"loom broker error: {type(e).__name__}")
+        await self._reply(reply)
+
+    async def _reply(self, msg: dict[str, Any]) -> None:
+        with contextlib.suppress(KernelDied, ConnectionError):
+            await self._send(msg)
 
     async def _drain_stderr(self, proc: SandboxProcess) -> None:
         """The runner's own fd 2 before redirection (startup errors, runner crashes)."""
@@ -337,6 +431,33 @@ class KernelClient:
     async def _set_state(self, state: KernelState) -> None:
         self.state = state
         await self.bus.emit(ev.KernelStatus(state, self.vars))
+
+
+async def _wait(future: asyncio.Future[dict[str, Any]], clock: ExecClock) -> dict[str, Any]:
+    """Wait for an execution's result; TimeoutError once the clock runs out."""
+    while True:
+        clock.changed.clear()
+        timeout = None if clock.is_paused else clock.remaining()
+        if timeout is not None and timeout <= 0:
+            raise TimeoutError
+        changed = asyncio.ensure_future(clock.changed.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {future, changed}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            changed.cancel()
+        if future in done:
+            return future.result()
+
+
+def _tool_error(call_id: str, error_type: str, message: str) -> dict[str, Any]:
+    return {
+        "type": "tool_result",
+        "call_id": call_id,
+        "ok": False,
+        "error": {"type": error_type, "message": message},
+    }
 
 
 def _ms(start: float) -> int:

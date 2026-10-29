@@ -87,7 +87,7 @@ Single-key answer via a short prompt_toolkit key-binding app. Calls `bus.respond
 |---|---|
 | `/help` | list commands |
 | `/model [alias]` | show or switch model |
-| `/mode [read-only\|ask\|auto-write\|yolo]` | approval mode |
+| `/mode [read-only\|ask\|auto-write\|yolo]` | approval mode (kept for later sessions; not saved to config) |
 | `/kernel`, `/kernel reset` | inventory; restart kernel |
 | `/tools [query]` | browse tool catalog |
 | `/compact [instructions]` | manual compaction |

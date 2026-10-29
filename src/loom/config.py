@@ -34,6 +34,20 @@ _NETWORK_RANK: dict[str, int] = {"allowlist": 0, "none": 1}
 _SAFE_PROJECT_SECTIONS = frozenset({"agent", "context", "budget", "kernel", "skills", "agents"})
 
 
+def _secret_name(value: str | None) -> str | None:
+    """`api_key_secret` and `secret:` headers name a secret; they never hold the value.
+    The message must not echo the value: it may be a real key pasted by mistake."""
+    from loom.broker.secrets import NAME_RE
+
+    if value is not None and not NAME_RE.match(value):
+        hint = " (this looks like a key itself)" if value.startswith(("sk-", "sk_")) else ""
+        raise ValueError(
+            f"must be a secret name like 'anthropic_api_key'{hint}; store the value with "
+            "`loom secrets set <name>` and remove it from this file"
+        )
+    return value
+
+
 class ConfigError(Exception):
     """Invalid or unreadable configuration. The message names the offending file."""
 
@@ -84,6 +98,19 @@ class ModelEntry(_Model):
     thinking: ThinkingEntry | None = None
     pricing: PricingEntry | None = None
 
+    @field_validator("api_key_secret")
+    @classmethod
+    def _api_key_secret_is_a_name(cls, value: str | None) -> str | None:
+        return _secret_name(value)
+
+    @field_validator("headers")
+    @classmethod
+    def _secret_headers_are_names(cls, value: dict[str, str]) -> dict[str, str]:
+        for header in value.values():
+            if header.startswith("secret:"):
+                _secret_name(header.removeprefix("secret:"))
+        return value
+
     @field_validator("extra_body")
     @classmethod
     def _no_reserved_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +122,11 @@ class ModelEntry(_Model):
 
 class ProviderEntry(_Model):
     api_key_secret: str | None = None
+
+    @field_validator("api_key_secret")
+    @classmethod
+    def _api_key_secret_is_a_name(cls, value: str | None) -> str | None:
+        return _secret_name(value)
 
 
 class AgentConfig(_Model):

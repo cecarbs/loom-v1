@@ -49,13 +49,13 @@ A minimal terminal agent harness (in the spirit of Pi and Claude Code) that runs
 | Default model | Anthropic `claude-sonnet-5-5` (built-in profile, alias `sonnet`) |
 | Built-in tool approvals | Sandbox-aware: workspace mutations (`write`/`edit`/`bash`/`execute`) are auto-allowed in `ask` mode when sandboxed (undo covers them); `bash`/`execute` ask when the backend is `none`. Table in `03-tools.md`. |
 | Steering | Not in v1 (see Non-goals) |
+| First tool packages | `loom-tools-demo` and `loom-tools-splunk` only; others (GitHub, Jira, kubectl…) decided later, once the broker API has seen real use (asked at M4) |
 | Repo | This directory (`loom/`), git-initialised; docs live in `docs/` |
 
 ## Open questions (Claude Code: ask the owner when you reach the relevant milestone)
 
 1. Default sandbox (M5): `seatbelt` (fast, no dependencies) vs `docker` (stronger isolation). Docs assume `seatbelt`.
-2. Which tool packages to ship first besides the Splunk example (GitHub? Jira? kubectl?) (M4).
-3. Whether to read Claude Code skills from `~/.claude/skills` for compatibility (default: off, opt-in) (M8).
-4. Default model for non-Anthropic providers (M7).
+2. Whether to read Claude Code skills from `~/.claude/skills` for compatibility (default: off, opt-in) (M8).
+3. Default model for non-Anthropic providers (M7).
 
 Resolved: product name (`loom`), default Anthropic model (`claude-sonnet-5-5`); see Decisions.

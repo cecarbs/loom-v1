@@ -5,12 +5,14 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import get_args
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from loom.app import App
+from loom.config import ApprovalMode
 from loom.tui.render import Renderer, format_cost
 
 
@@ -149,6 +151,22 @@ async def _kernel(ctx: CommandContext, args: str) -> None:
     ctx.console.print(table)
 
 
+def _tools(ctx: CommandContext, args: str) -> None:
+    ctx.console.print(Text(ctx.app.broker.search(args, limit=50)), soft_wrap=True)
+
+
+def _mode(ctx: CommandContext, args: str) -> None:
+    modes = get_args(ApprovalMode)
+    if args:
+        if args not in modes:
+            ctx.console.print(Text(f"Unknown mode '{args}'. Modes: {', '.join(modes)}", "red"))
+            return
+        ctx.app.set_mode(args)  # type: ignore[arg-type]  # checked above
+    ctx.console.print(f"Approval mode: [bold]{ctx.app.mode}[/]")
+    if not args:
+        ctx.console.print(Text("Modes: " + ", ".join(modes), style="dim"))
+
+
 def _thinking(ctx: CommandContext, args: str) -> None:
     if args in ("on", "off"):
         ctx.renderer.show_thinking = args == "on"
@@ -173,6 +191,8 @@ BUILTINS = (
     Command("cost", "token usage and cost for this session", _cost),
     Command("clear", "start a new session in this workspace", _clear),
     Command("kernel", "show kernel variables, or restart it", _kernel, "[reset]"),
+    Command("tools", "browse kernel tool functions", _tools, "[query]"),
+    Command("mode", "show or set the approval mode", _mode, "[read-only|ask|auto-write|yolo]"),
     Command("thinking", "show or collapse thinking output", _thinking, "on|off"),
     Command("exit", "quit", _exit, aliases=("quit",)),
 )

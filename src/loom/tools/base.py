@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ValidationError
 
 from loom.broker.approval import Access, Approvals, denial_text
+from loom.broker.broker import ToolBroker
+from loom.broker.redact import Redactor
 from loom.core.events import EventBus, ToolCallFinished, ToolCallStarted
 from loom.core.messages import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
 from loom.kernel.client import KernelClient
@@ -46,6 +48,7 @@ class ToolContext:
     sandbox: SandboxBackend | None = None
     sandbox_env: dict[str, str] = field(default_factory=dict)
     kernel: KernelClient | None = None
+    broker: ToolBroker | None = None
     workspace_writable: bool = True
 
 
@@ -78,12 +81,14 @@ class ToolSet:
         session_log: SessionLog,
         bus: EventBus,
         approvals: Approvals | None = None,
+        redactor: Redactor | None = None,
     ) -> None:
         self._tools = {t.name: t for t in tools}
         self._budget = budget
         self._log = session_log
         self._bus = bus
         self.approvals = approvals
+        self.redactor = redactor
 
     @property
     def budget(self) -> OutputBudget:
@@ -122,6 +127,8 @@ class ToolSet:
         start = time.monotonic()
 
         result = await self._execute(call, replace(ctx, call_id=call.id))
+        if self.redactor is not None:
+            result.text = self.redactor.text(result.text)
         kernel_ref = result.meta.get("kernel_ref")
         text, spill = self._budget.apply(
             result.text, kernel_ref=kernel_ref if isinstance(kernel_ref, int) else None

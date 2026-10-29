@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loom.broker.redact import Redactor
+
 
 @dataclass(frozen=True)
 class SessionPaths:
@@ -53,11 +55,16 @@ def new_session(workspace: Path, home: Path | None = None) -> SessionPaths:
 
 
 class SessionLog:
-    def __init__(self, path: Path) -> None:
+    """Every record passes through the redactor: secret values never reach the log."""
+
+    def __init__(self, path: Path, redactor: Redactor | None = None) -> None:
         self.path = path
+        self.redactor = redactor
 
     def append(self, kind: str, **data: Any) -> None:
         record = {"ts": time.time(), "kind": kind, **data}
+        if self.redactor is not None:
+            record = self.redactor.value(record)
         line = json.dumps(record, ensure_ascii=False, default=str)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")

@@ -1,8 +1,11 @@
-"""Approval policy (docs/03 "Approvals for built-in tools"; the broker table arrives in M4).
+"""Approval policy: one decision path for built-in tools (docs/03 "Approvals for built-in
+tools") and kernel tool calls through the broker (docs/04 "Approval policy").
 
 Built-in tools are sandbox-aware: workspace changes are undoable and the sandbox contains
 everything else, so they don't prompt; with backend `none`, shell and kernel run with full
-host access, so they ask. Every decision that isn't a plain table "allow" is logged.
+host access, so they ask. Broker tools are decided by their declared effect. Overrides and
+"allow for this session" apply to both. Every decision that isn't a plain table "allow" is
+logged.
 """
 
 from __future__ import annotations
@@ -17,8 +20,10 @@ from loom.core.events import ApprovalRequested, Decision, EventBus
 from loom.session.store import SessionLog
 
 Rule = Literal["allow", "ask", "deny"]
-# What a built-in tool call does, as far as the policy is concerned.
-AccessKind = Literal["read", "outside_read", "write", "exec"]
+# What a call does, as far as the policy is concerned. Built-in tools use read,
+# outside_read, write, exec; broker tools their declared effect (read, write, destructive).
+AccessKind = Literal["read", "outside_read", "write", "exec", "destructive"]
+Table = Literal["builtin", "broker"]
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class Access:
     preview: str = ""  # shown in the approval prompt
     reason: str = ""  # why it needs approval (e.g. "outside the workspace")
     scope: str = ""  # what "allow for this session" covers; defaults to the tool name
+    table: Table = "builtin"
 
 
 def builtin_rule(kind: AccessKind, mode: ApprovalMode, *, sandboxed: bool) -> Rule:
@@ -41,6 +47,18 @@ def builtin_rule(kind: AccessKind, mode: ApprovalMode, *, sandboxed: bool) -> Ru
             if sandboxed or mode in ("auto-write", "yolo"):
                 return "allow"
             return "ask"
+        case "destructive":  # not a built-in kind; treat like the broker would
+            return broker_rule(kind, mode)
+
+
+def broker_rule(effect: AccessKind, mode: ApprovalMode) -> Rule:
+    if mode == "yolo" or effect == "read":
+        return "allow"
+    if mode == "read-only":
+        return "deny"
+    if effect == "write" and mode == "auto-write":
+        return "allow"
+    return "ask"
 
 
 class Approvals:
@@ -56,8 +74,11 @@ class Approvals:
         self._ids = itertools.count(1)
 
     async def check(self, tool: str, access: Access, *, call_id: str = "") -> Decision:
-        """Decide whether a built-in tool call may run, asking the user if needed."""
-        rule = builtin_rule(access.kind, self.mode, sandboxed=self.sandboxed)
+        """Decide whether a call may run, asking the user if needed."""
+        if access.table == "broker":
+            rule = broker_rule(access.kind, self.mode)
+        else:
+            rule = builtin_rule(access.kind, self.mode, sandboxed=self.sandboxed)
         if rule == "allow" and tool not in self.overrides:
             return Decision("allow_once", by="policy")  # the common case; not logged
 
@@ -111,7 +132,7 @@ class Approvals:
 
 
 def denial_text(tool: str, decision: Decision, mode: ApprovalMode) -> str:
-    """The error result the model sees for a denied call."""
+    """The error result the model sees for a denied built-in tool call."""
     if decision.by == "user":
         return f"The user denied this {tool} call" + (
             f": {decision.message}" if decision.message else "."

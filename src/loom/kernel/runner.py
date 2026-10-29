@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import codecs
+import datetime
 import inspect
+import itertools
 import json
 import linecache
 import os
@@ -45,6 +48,179 @@ def compose_text(output: str, value_repr: str | None, error: str | None) -> str:
                 text += "\n"
             text += extra
     return text
+
+
+# --- tool calls (docs/04 "Protocol", "Runner behavior") --------------------------------
+
+
+class ToolError(Exception):
+    """A kernel tool call failed on the host."""
+
+
+class PermissionDenied(ToolError):
+    """The approval policy or the user denied the call."""
+
+
+class ToolNotFound(ToolError):
+    pass
+
+
+class InvalidArguments(ToolError):
+    pass
+
+
+class ToolTimeout(ToolError):
+    pass
+
+
+class MissingSecret(ToolError):
+    pass
+
+
+TOOL_ERRORS: dict[str, type[ToolError]] = {
+    cls.__name__: cls
+    for cls in (
+        ToolError,
+        PermissionDenied,
+        ToolNotFound,
+        InvalidArguments,
+        ToolTimeout,
+        MissingSecret,
+    )
+}
+for _cls in TOOL_ERRORS.values():
+    _cls.__module__ = "tools"  # tracebacks read `tools.PermissionDenied: …`
+
+
+def _encode_arg(value: Any) -> Any:
+    """json.dumps fallback for tool arguments."""
+    if isinstance(value, (bytes, bytearray)):
+        return {"__bytes__": base64.b64encode(bytes(value)).decode("ascii")}
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (set, frozenset)):
+        return list(value)
+    raise TypeError(f"{type(value).__name__} is not JSON-serializable")
+
+
+def _decode_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if len(value) == 1 and "__bytes__" in value and isinstance(value["__bytes__"], str):
+            return base64.b64decode(value["__bytes__"])
+        return {k: _decode_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_value(v) for v in value]
+    return value
+
+
+class _Annotation:
+    """Shows a catalog annotation string unquoted in signatures and help()."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __repr__(self) -> str:
+        return self.text
+
+
+class ToolCalls:
+    """Synchronous stubs: send `tool_call`, block until the matching `tool_result`."""
+
+    def __init__(self, kernel: Kernel) -> None:
+        self.kernel = kernel
+        self._pending: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
+        self._lock = threading.Lock()
+        self._ids = itertools.count(1)
+
+    def call(self, tool: str, args: dict[str, Any]) -> Any:
+        try:
+            json.dumps(args, default=_encode_arg)
+        except (TypeError, ValueError) as e:
+            raise TypeError(f"{tool}: arguments must be JSON-serializable ({e})") from None
+        with self._lock:
+            call_id = f"c{next(self._ids)}"
+            done = threading.Event()
+            slot: dict[str, Any] = {}
+            self._pending[call_id] = (done, slot)
+        try:
+            self.kernel.channel.send(
+                {
+                    "type": "tool_call",
+                    "id": self.kernel.current_id,
+                    "call_id": call_id,
+                    "tool": tool,
+                    "args": json.loads(json.dumps(args, default=_encode_arg)),
+                }
+            )
+            done.wait()  # SIGINT still raises KeyboardInterrupt here
+        finally:
+            with self._lock:
+                self._pending.pop(call_id, None)  # a late result is then dropped
+        msg = slot["msg"]
+        if msg.get("ok"):
+            return _decode_value(msg.get("value"))
+        error = msg.get("error") or {}
+        cls = TOOL_ERRORS.get(str(error.get("type")), ToolError)
+        raise cls(str(error.get("message", "tool call failed")))
+
+    def resolve(self, msg: dict[str, Any]) -> None:
+        with self._lock:
+            entry = self._pending.get(str(msg.get("call_id")))
+        if entry is not None:
+            done, slot = entry
+            slot["msg"] = msg
+            done.set()
+
+
+def make_stub(calls: ToolCalls, entry: dict[str, Any]) -> Any:
+    package, name = str(entry["package"]), str(entry["name"])
+    qualname = f"{package}.{name}"
+    params = []
+    for p in entry.get("params", []):
+        params.append(
+            inspect.Parameter(
+                str(p["name"]),
+                getattr(inspect.Parameter, str(p.get("kind", "POSITIONAL_OR_KEYWORD"))),
+                default=p["default"] if "default" in p else inspect.Parameter.empty,
+                annotation=_Annotation(p["annotation"])
+                if "annotation" in p
+                else inspect.Parameter.empty,
+            )
+        )
+    returns = entry.get("returns")
+    signature = inspect.Signature(
+        params,
+        return_annotation=_Annotation(returns) if returns else inspect.Signature.empty,
+    )
+
+    def stub(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return calls.call(qualname, dict(bound.arguments))
+
+    stub.__name__ = stub.__qualname__ = name
+    stub.__module__ = package
+    doc = str(entry.get("doc") or "")
+    stub.__doc__ = f"{doc}\n\nEffect: {entry.get('effect', '?')} (runs on the host via loom)."
+    stub.__signature__ = signature  # type: ignore[attr-defined]
+    return stub
+
+
+class _Repr(reprlib.Repr):
+    """reprlib, but dicts keep insertion order (reprlib sorts keys; print() doesn't)."""
+
+    def repr_dict(self, x: dict[Any, Any], level: int) -> str:
+        if not x:
+            return "{}"
+        if level <= 0:
+            return "{...}"
+        pieces = [
+            f"{self.repr1(k, level - 1)}: {self.repr1(x[k], level - 1)}"
+            for k in itertools.islice(x, self.maxdict)
+        ]
+        if len(x) > self.maxdict:
+            pieces.append("...")
+        return "{" + ", ".join(pieces) + "}"
 
 
 class Channel:
@@ -119,9 +295,10 @@ class Kernel:
         self.current_id: str | None = None
         self.captures: list[Capture] = []
         self.loop = asyncio.new_event_loop()
+        self.calls = ToolCalls(self)
         self._output: list[str] = []
         self._output_lock = threading.Lock()
-        self._repr = reprlib.Repr()
+        self._repr = _Repr()
 
     # --- setup -----------------------------------------------------------------------
 
@@ -134,11 +311,26 @@ class Kernel:
         r.maxlist = r.maxtuple = r.maxset = r.maxfrozenset = r.maxdeque = 50
         r.maxarray = r.maxdict = 50
         r.maxstring = r.maxlong = r.maxother = self.repr_max
-        # M4: build tool stubs from msg["catalog"] here and add their names to `reserved`.
+        self._install_tools(msg.get("catalog") or [])
         self.reserved = set(self.ns)
         self.channel.send(
             {"type": "ready", "python": platform.python_version(), "pid": os.getpid()}
         )
+
+    def _install_tools(self, catalog: list[dict[str, Any]]) -> None:
+        """One module per package (`splunk.search(...)`), also reachable as `tools.splunk`."""
+        tools = types.SimpleNamespace(**TOOL_ERRORS)
+        for package in catalog:
+            name = str(package.get("name"))
+            module = types.ModuleType(name, str(package.get("description") or ""))
+            for entry in package.get("tools", []):
+                setattr(module, str(entry["name"]), make_stub(self.calls, entry))
+            setattr(tools, name, module)
+            self.ns[name] = module
+            sys.modules.setdefault(name, module)  # `import splunk`, unless it shadows a module
+        self.ns["tools"] = tools
+        self.ns["ToolError"] = ToolError
+        self.ns["PermissionDenied"] = PermissionDenied
 
     # --- output ----------------------------------------------------------------------
 
@@ -296,15 +488,18 @@ def summarize(value: Any) -> str:
 
 
 def format_error(error: BaseException) -> str:
-    """Traceback from the first cell frame on (runner frames are noise for the model)."""
+    """Traceback from the first cell frame on, without runner frames (tool stubs): they
+    are noise for the model."""
     tb = error.__traceback__
     while tb is not None and not tb.tb_frame.f_code.co_filename.startswith("<cell "):
         tb = tb.tb_next
     if isinstance(error, SyntaxError) or tb is None:
-        lines = traceback.format_exception_only(type(error), error)
-    else:
-        lines = traceback.format_exception(type(error), error, tb)
-    return "".join(lines).rstrip("\n")
+        return "".join(traceback.format_exception_only(type(error), error)).rstrip("\n")
+    exc = traceback.TracebackException(type(error), error, tb)
+    exc.stack = traceback.StackSummary.from_list(
+        [frame for frame in exc.stack if frame.filename != __file__]
+    )
+    return "".join(exc.format()).rstrip("\n")
 
 
 def _exec_number(exec_id: str) -> int | None:
@@ -344,10 +539,13 @@ def _read_protocol(fd: int, kernel: Kernel, work: queue.Queue[dict[str, Any]]) -
             kind = msg.get("type")
             if kind == "inventory":
                 kernel.inventory(msg)  # answered even while a cell runs
+            elif kind == "tool_result":
+                kernel.calls.resolve(msg)  # unknown or abandoned call ids are dropped
             elif kind in ("init", "execute", "shutdown"):
                 work.put(msg)
-            # "tool_result" arrives with the broker (M4); unknown call ids are dropped.
-    work.put({"type": "shutdown"})
+    # EOF: the host is gone. Exit even if a cell is still running or a stub is waiting
+    # for a tool result that will never come; nobody can read our output any more.
+    os._exit(0)
 
 
 def main() -> None:

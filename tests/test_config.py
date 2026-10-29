@@ -269,3 +269,24 @@ def test_workspace_at_home_is_not_filtered(tmp_path: Path) -> None:
     loaded = load_config(home, user_path=user_path)
     assert loaded.config.default_model == "local"
     assert loaded.notices == ()
+
+
+def test_secret_settings_must_be_names_and_errors_never_echo_them(tmp_path: Path) -> None:
+    key = "sk-ant-api03-" + "x" * 90
+    user = tmp_path / "user.toml"
+    user.write_text(f'[providers.anthropic]\napi_key_secret = "{key}"\n')
+    with pytest.raises(ConfigError) as info:
+        load_config(tmp_path, user_path=user)
+    message = str(info.value)
+    assert "providers.anthropic.api_key_secret" in message and "looks like a key" in message
+    assert key not in message and "sk-ant" not in message
+
+    user.write_text(
+        '[models.gw]\nprovider = "openai_compat"\nmodel = "m"\n'
+        '[models.gw.headers]\n"X-Key" = "secret:not a name!"\n'
+    )
+    with pytest.raises(ConfigError, match="must be a secret name"):
+        load_config(tmp_path, user_path=user)
+
+    user.write_text('[providers.anthropic]\napi_key_secret = "anthropic_api_key"\n')
+    assert load_config(tmp_path, user_path=user).config.providers["anthropic"].api_key_secret

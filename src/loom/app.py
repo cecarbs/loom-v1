@@ -6,19 +6,22 @@ a new session. UIs cancel a turn by cancelling the task running `submit`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from loom import __version__
 from loom.broker.approval import Approvals
-from loom.broker.secrets import SecretStore
-from loom.config import LoomConfig
+from loom.broker.broker import ToolBroker
+from loom.broker.registry import ToolPackage, discover_packages
+from loom.broker.secrets import KeyringKeychain, SecretStore
+from loom.config import ApprovalMode, LoomConfig
 from loom.core import events as ev
 from loom.core.agent import AgentLoop
 from loom.core.context import ContextBuilder
 from loom.core.events import EventBus
 from loom.core.mentions import expand_mentions
-from loom.kernel.client import KernelClient
+from loom.kernel.client import ExecClock, KernelClient
 from loom.kernel.protocol import VarInfo
 from loom.providers.base import Provider
 from loom.providers.profiles import ModelProfile, resolve_profile
@@ -31,6 +34,7 @@ from loom.tools.builtin.bash import BashTool
 from loom.tools.builtin.edit import EditTool
 from loom.tools.builtin.execute import ExecuteTool
 from loom.tools.builtin.read import ReadTool
+from loom.tools.builtin.search_tools import SearchToolsTool
 from loom.tools.builtin.write import WriteTool
 from loom.tools.paths import PathPolicy, ReadSet
 
@@ -45,15 +49,20 @@ def build_agent(
     home: Path | None = None,
     model: str | None = None,
     backend: SandboxBackend | None = None,
+    packages: Sequence[ToolPackage] | None = None,
 ) -> AgentLoop:
-    """Raises SandboxUnavailable if the configured backend can't be used."""
+    """Raises SandboxUnavailable if the configured backend can't be used. `packages`
+    defaults to the installed tool packages."""
     profile = resolve_profile(model or config.default_model, config)
-    provider = provider or create_provider(profile, secrets or SecretStore())
+    secrets = secrets or SecretStore()
+    provider = provider or create_provider(profile, secrets)
     backend = backend or create_backend(config.sandbox.backend)
+    if packages is None:
+        packages, _ = discover_packages()
 
     paths = new_session(workspace, home)
     session = SessionInfo(paths.id, workspace, paths.root)
-    session_log = SessionLog(paths.log)
+    session_log = SessionLog(paths.log, secrets.redactor)
     session_log.append(
         "session_start",
         session_id=paths.id,
@@ -67,6 +76,25 @@ def build_agent(
 
     env = sandbox_env(session, config.sandbox.env_passthrough)
     workspace_writable = config.approvals.mode != "read-only"
+    approvals = Approvals(
+        config.approvals, sandboxed=backend.name != "none", bus=bus, session_log=session_log
+    )
+    broker = ToolBroker(
+        packages,
+        approvals=approvals,
+        secrets=secrets,
+        session_log=session_log,
+        package_config=config.packages,
+        call_timeout_s=config.broker.call_timeout_s,
+        log_results=config.tracing.log_tool_results,
+    )
+
+    async def handle_tool_call(
+        tool: str, args: object, call_id: str, clock: ExecClock
+    ) -> dict[str, Any]:
+        reply = await broker.call(tool, args, call_id=call_id, clock=clock)
+        return reply.message_for(call_id)
+
     kernel = KernelClient(
         backend,
         session,
@@ -75,9 +103,8 @@ def build_agent(
         session_log=session_log,
         settings={"repr_max": REPR_MAX, "out_max_chars": config.budget.max_chars},
         workspace_writable=workspace_writable,
-    )
-    approvals = Approvals(
-        config.approvals, sandboxed=backend.name != "none", bus=bus, session_log=session_log
+        catalog=broker.catalog(),
+        tool_handler=handle_tool_call,
     )
     tools = ToolSet(
         [
@@ -86,11 +113,13 @@ def build_agent(
             EditTool(),
             BashTool(),
             ExecuteTool(config.kernel.default_timeout_s),
+            SearchToolsTool(broker),
         ],
         OutputBudget(config.budget, paths.out_dir),
         session_log,
         bus,
         approvals,
+        secrets.redactor,
     )
     tool_ctx = ToolContext(
         workspace=workspace,
@@ -101,6 +130,7 @@ def build_agent(
         sandbox=backend,
         sandbox_env=env,
         kernel=kernel,
+        broker=broker,
         workspace_writable=workspace_writable,
     )
     return AgentLoop(
@@ -130,13 +160,19 @@ class App:
         provider_factory: ProviderFactory | None = None,
         secrets: SecretStore | None = None,
         home: Path | None = None,
+        packages: Sequence[ToolPackage] | None = None,
     ) -> None:
         self.workspace = workspace
         self.config = config
         self.bus = bus or EventBus()
         self.home = home
-        secrets = secrets or SecretStore()
-        self._make_provider = provider_factory or (lambda p: create_provider(p, secrets))
+        self.secrets = secrets or SecretStore(keychain=KeyringKeychain())
+        self._make_provider = provider_factory or (lambda p: create_provider(p, self.secrets))
+        if packages is None:
+            packages, self.notices = discover_packages()
+        else:
+            self.notices = []
+        self.packages = list(packages)
         self.backend = create_backend(config.sandbox.backend)
         self.agent = self._build(config.default_model)
 
@@ -150,6 +186,8 @@ class App:
             home=self.home,
             model=alias,
             backend=self.backend,
+            secrets=self.secrets,
+            packages=self.packages,
         )
 
     @property
@@ -194,6 +232,30 @@ class App:
         self.agent = self._build(self.agent.profile.alias)
         await self.start()
         return self.session_id
+
+    @property
+    def broker(self) -> ToolBroker:
+        broker = self.agent.tool_ctx.broker
+        assert broker is not None
+        return broker
+
+    @property
+    def mode(self) -> ApprovalMode:
+        approvals = self.agent.tools.approvals
+        return approvals.mode if approvals is not None else self.config.approvals.mode
+
+    def set_mode(self, mode: ApprovalMode) -> None:
+        """Change the approval mode for this session and later ones (`/mode`)."""
+        approvals = self.agent.tools.approvals
+        if approvals is not None:
+            approvals.mode = mode
+        writable = mode != "read-only"
+        self.agent.tool_ctx.workspace_writable = writable
+        self.kernel.workspace_writable = writable  # applies to the next kernel start
+        self.config = self.config.model_copy(
+            update={"approvals": self.config.approvals.model_copy(update={"mode": mode})}
+        )
+        self.agent.log.append("mode_change", mode=mode)
 
     async def kernel_inventory(self) -> list[VarInfo]:
         return await self.kernel.inventory()

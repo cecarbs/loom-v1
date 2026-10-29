@@ -51,12 +51,11 @@ class InlineUI:
         self.source = source
 
     def toolbar(self) -> str:
-        config = self.app.config
         return " " + status_line(
             self.renderer.status,
             self.app.profile.alias,
             self.app.backend.describe(),
-            config.approvals.mode,
+            self.app.mode,
             self.renderer.status.kernel(),
         )
 
@@ -69,6 +68,8 @@ class InlineUI:
                 ("/help for commands, Ctrl+D to quit", "dim"),
             )
         )
+        for notice in self.app.notices:
+            self.console.print(Text(f"· {notice}", style="yellow"))
         ctrl_c_pending = False
         while True:
             line = await self.source.read()

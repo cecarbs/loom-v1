@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -80,20 +81,36 @@ def test_compose_text() -> None:
     assert runner.compose_text("out\n", None, "Traceback") == "out\nTraceback"
 
 
-@pytest.mark.skipif(shutil.which("python3.11") is None, reason="needs python3.11")
-def test_runner_runs_on_python_311(tmp_path: Path) -> None:
-    lines = (
-        '{"type": "init", "settings": {}}\n'
-        '{"type": "execute", "id": "e1", "code": "x = [1, 2]\\nprint(\'hi\')\\nx"}\n'
-        '{"type": "shutdown"}\n'
+def _converse(python: str) -> list[dict]:
+    """Talk to a bare runner like the host does: replies are read before stdin closes."""
+    proc = subprocess.Popen(
+        [python, "-I", str(RUNNER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE
     )
+    assert proc.stdin is not None and proc.stdout is not None
+    sent = [
+        {"type": "init", "settings": {}},
+        {"type": "execute", "id": "e1", "code": "x = [1, 2]\nprint('hi')\nx"},
+    ]
+    for msg in sent:
+        proc.stdin.write((json.dumps(msg) + "\n").encode())
+    proc.stdin.flush()
+    received = []
+    while not received or received[-1]["type"] != "execute_result":
+        received.append(json.loads(proc.stdout.readline()))
+    proc.stdin.write(b'{"type": "shutdown"}\n')
+    proc.stdin.close()
+    assert proc.wait(timeout=5) == 0
+    return received
+
+
+@pytest.mark.skipif(shutil.which("python3.11") is None, reason="needs python3.11")
+def test_runner_runs_on_python_311() -> None:
     python = shutil.which("python3.11")
     assert python is not None
-    done = subprocess.run(
-        [python, "-I", str(RUNNER)], input=lines, capture_output=True, text=True, timeout=30
-    )
-    assert '"type": "ready"' in done.stdout
-    assert '"text": "hi\\n"' in done.stdout and '"value_repr": "[1, 2]"' in done.stdout
+    received = _converse(python)
+    assert received[0]["type"] == "ready" and received[0]["python"].startswith("3.11")
+    assert {"type": "stream", "id": "e1", "name": "stdout", "text": "hi\n"} in received
+    assert received[-1]["value_repr"] == "[1, 2]"
 
 
 # --- execution ----------------------------------------------------------------------
@@ -302,3 +319,19 @@ async def test_startup_failure_is_a_result_not_a_crash(tmp_path: Path) -> None:
     result = await kernel.execute("1", timeout_s=10)
     assert result.status == "died" and "failed to start" in result.output
     assert kernel.state == "dead"
+
+
+def test_runner_exits_when_the_host_goes_away(tmp_path: Path) -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-I", str(RUNNER)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write(b'{"type": "init", "settings": {}}\n')
+    proc.stdin.write(b'{"type": "execute", "id": "e1", "code": "while True: pass"}\n')
+    proc.stdin.flush()
+    assert b'"ready"' in proc.stdout.readline()
+    proc.stdin.close()  # the host died mid-execution
+    assert proc.wait(timeout=5) == 0

@@ -10,6 +10,7 @@ dependencies = [
     "prompt-toolkit>=3.0.53",
     "pydantic>=2.9",
     "rich>=15.0.0",
+    "keyring>=25.7",
 ]
 
 [project.scripts]
@@ -17,11 +18,21 @@ loom = "loom.cli:main"
 
 [dependency-groups]
 dev = [
+    "loom-tools-demo",
+    "loom-tools-splunk",
     "pyright>=1.1.390",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
 ]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+loom = { workspace = true }
+loom-tools-demo = { workspace = true }
+loom-tools-splunk = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -47,7 +58,7 @@ select = ["E", "F", "W", "I", "UP", "B", "RUF"]
 [tool.pyright]
 typeCheckingMode = "basic"
 pythonVersion = "3.12"
-include = ["src", "tests"]
+include = ["src", "tests", "packages"]
 venvPath = "."
 venv = ".venv"
 

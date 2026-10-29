@@ -69,13 +69,19 @@ Kernel → host:
 
 `args` is always a single dict of named parameters: the stub binds positional and keyword arguments with `inspect.Signature.bind`, applies defaults, and sends the result. Tool functions therefore may not use `*args`/`**kwargs` (the registry rejects them).
 
+EOF on the runner's protocol stdin means the host is gone: the runner exits immediately, even mid-execution or while a stub waits (otherwise a killed loom would leave kernels running forever).
+
 `inventory` is answered by the runner's protocol thread, so it works while a cell runs.
 
 Interrupt: the host sends **SIGINT** to the runner process (not a protocol message), which raises `KeyboardInterrupt` in the executing code (the runner's handler ignores SIGINT while idle); the runner replies with `execute_result` status `error`, ename `KeyboardInterrupt`. If no reply within 3 s, the host kills the process (kernel → dead). The runner is spawned in its own process group (`05-sandbox.md`), so a terminal Ctrl+C reaches only loom, which decides whether to interrupt.
 
-Abandoned calls: if an execution is interrupted or times out while a stub is waiting, the host cancels that broker call (a pending approval resolves as deny, logged with `by: "cancel"`). A `tool_result` for an unknown or abandoned `call_id` is dropped by the runner.
+Catalog (`init`): one entry per package, `{"name", "description", "tools": [{"package", "name", "doc", "effect", "params": [{"name", "kind", "annotation"?, "default"?}], "returns"?}]}`. Annotations are display strings; defaults must be JSON values (the registry rejects others).
 
-Serialization: tool args and results must be JSON-serializable (dicts, lists, str, int, float, bool, None). The broker converts datetimes to ISO strings and bytes to base64 (with a `{"__bytes__": ...}` wrapper the stub decodes). Large results are fine — this pipe is not the model's context.
+Abandoned calls: if an execution is interrupted or times out while a stub is waiting, the host cancels that broker call (a pending approval resolves as deny, logged with `by: "cancel"`) and, if the kernel is alive, answers it with a `ToolError` so threads in model code don't block forever. A `tool_result` for an unknown or abandoned `call_id` is dropped by the runner. A `tool_call` whose `id` isn't the running execution (e.g. from a background thread between executions) is answered with `ToolError: tool calls only work while an execute call runs`.
+
+Errors raised in the kernel (`tool_result.error.type` → exception class, all subclasses of `ToolError`, reachable as `tools.<Name>`; `ToolError` and `PermissionDenied` are also top-level names): `ToolNotFound`, `InvalidArguments`, `PermissionDenied`, `ToolTimeout`, `MissingSecret`, and `ToolError` for anything a package raised (`"<pkg.tool>: <ExcType>: <message>"`, redacted). Stub frames are removed from tracebacks shown to the model.
+
+Serialization: tool args and results must be JSON-serializable (dicts, lists, str, int, float, bool, None). Both directions convert datetimes to ISO strings, sets/tuples to lists, and bytes to base64 in a `{"__bytes__": ...}` wrapper that the other side decodes (the broker also accepts pydantic models, dataclasses and `Decimal` in results). Large results are fine — this pipe is not the model's context.
 
 ## Runner behavior (stdlib only)
 
@@ -101,7 +107,8 @@ def execute(code):
 - The namespace is a real module (`__loom__`, registered in `sys.modules`) so classes defined in cells can be pickled. The inventory lists names not starting with `_`, excluding modules and names the runner put there itself (stubs).
 - Top-level `await` is supported by compiling with `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` and running the coroutine on a runner-owned event loop.
 - Stubs are **synchronous**: a stub writes a `tool_call` message and blocks on a per-call `threading.Event` until the matching `tool_result` arrives (a reader thread dispatches incoming messages). This keeps model code simple (`rows = splunk.search(...)`).
-- Stubs carry real signatures and docstrings (`inspect.Signature` built from the catalog), so `help(splunk.search)` works inside the kernel.
+- Stubs carry real signatures and docstrings (`inspect.Signature` built from the catalog), so `help(splunk.search)` works inside the kernel. Each package is a module in the namespace (`splunk`), under `tools.splunk`, and in `sys.modules` unless that would shadow a real module. Package names `tools`, `agents`, `loom`, keywords and `_`-names are rejected.
+- The last-expression repr keeps dict insertion order (plain `reprlib` sorts keys, which `print()` doesn't).
 - `pandas`, `numpy`, `pyarrow` may be present in the sandbox Python (Docker image / venv) but the runner never requires them.
 
 ## Tool packages (`loom.broker.registry`)
@@ -139,9 +146,12 @@ def list_indexes(ctx) -> list[str]: ...
 def create_saved_search(ctx, name: str, spl: str) -> dict: ...
 ```
 
-- `ctx` is injected by the broker (never visible in the stub signature). It provides `secret(name)`, `config` (the package's `[packages.<name>]` table), `client(name)` (per-session cached clients), `log`.
+- `ctx` is injected by the broker (never visible in the stub signature). It provides `secret(name)` (by the key in `secrets=`; raises `MissingSecret` with a `loom secrets set` hint), `config` (the package's `[packages.<name>]` table), `client(name)` (built once per session by the factory registered with `@package.client(name)`, then cached), `log`.
 - `effect` is one of `read`, `write`, `destructive`. Required.
-- Package functions may be sync or async; sync ones run via `asyncio.to_thread`.
+- Package functions may be sync or async; sync ones run via `asyncio.to_thread` (a sync call that hits `call_timeout_s` returns `ToolTimeout`, but its thread runs to completion).
+- Arguments are validated against a pydantic model built from the signature (`extra="forbid"`, lax coercion), so `limit="5"` becomes `5` and unknown names are rejected.
+- `search_tools` scores name > package > docstring keyword hits (plus close matches on name words); an empty query lists packages. `/tools [query]` shows the same, and `loom tools list` prints the whole catalog.
+- Broker log entries (`broker_call`): tool, call_id, args (redacted), effect, decision `{action, by}`, duration_ms, ok, `result_chars` or `error {type, message}`, and the result itself only with `[tracing] log_tool_results`.
 - `loom-tools-demo` ships synthetic logs/tickets with no external dependencies; it powers tests and the first-run tutorial.
 
 ## Broker call pipeline
@@ -173,5 +183,7 @@ This table covers broker (kernel) tools. Built-in tools follow the sandbox-aware
 ## Secrets (`loom.broker.secrets`)
 
 - Stored in the macOS Keychain via `keyring` (service `loom`, account = secret name). `loom secrets set splunk_token` prompts with hidden input.
-- Fallback: environment variable `LOOM_SECRET_<NAME>` (for CI).
+- Fallback: environment variable `LOOM_SECRET_<NAME>` (for CI). Lookup order: Keychain, then environment; values are cached per process.
+- `loom secrets list` shows names recorded in `~/.loom/secrets.json` (names only; the Keychain can't list by service) plus `LOOM_SECRET_*` variables.
+- The redactor also matches known token shapes (Anthropic/OpenAI keys, GitHub, Slack, AWS key ids, JWTs). It is applied to broker results and errors, to every built-in tool result before the output budget, and to every session-log record. Values shorter than 6 characters aren't registered (they'd scrub ordinary text).
 - Resolved only on the host by `SecretStore`, for the broker and provider adapters. Never placed in sandbox env, tool results, logs, or prompts. The redactor holds the resolved values to scrub them from outputs and from the session log.

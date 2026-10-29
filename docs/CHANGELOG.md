@@ -1,5 +1,36 @@
 # Changelog
 
+## M4 — Broker, tool packages, approvals, secrets
+
+- `loom.broker.registry`: `ToolPackage`, `@package.tool(effect=…)`, `@package.client(name)`,
+  `Secret`; signature checks (ctx first, no `*args`/`**kwargs`, JSON defaults, reserved
+  names); pydantic argument models; `loom.tools` entry-point discovery with load notices.
+- Runner: stubs with real signatures/docstrings per package module (`demo.search_logs`,
+  `tools.demo`, `import demo`), blocking `tool_call`/`tool_result` round trip, kernel-side
+  `ToolError` hierarchy (`PermissionDenied`, …), bytes/datetime encoding both ways, stub
+  frames hidden from tracebacks, dict reprs keep insertion order.
+- `ToolBroker`: resolve (nearest-name hints), validate, approve, run with
+  `call_timeout_s`, serialize, redact, `broker_call` log entries. `KernelClient` dispatches
+  calls as tasks, pauses the execute clock during approval prompts, cancels abandoned calls.
+- Approvals: broker table (read/write/destructive × mode), overrides and "allow for session"
+  shared with built-in tools; `/mode`.
+- Secrets: Keychain via `keyring` (then `LOOM_SECRET_*`), `loom secrets set|list|delete`;
+  `Redactor` fed by every resolved secret plus token patterns, applied to tool results and
+  every session-log record.
+- `search_tools` tool, `/tools`, `loom tools list`.
+- Packages (uv workspace members, installed by `uv sync --all-extras`): `loom-tools-demo`
+  (48k synthetic log rows with a 02:00 checkout incident; tickets with write/destructive
+  tools) and `loom-tools-splunk` (`search`, `list_indexes`, `create_saved_search`;
+  `allowed_indexes` enforcement; tested against a fake service).
+- Fix found while testing: runners outlived a killed host when blocked in a stub; the runner
+  now exits on protocol EOF.
+- Config: `api_key_secret` and `secret:` header values must be secret names; a pasted key
+  is rejected at startup with a message that never echoes the value (it previously failed
+  silently and fell back to the environment).
+- Sign-off: one Sonnet run with `ANTHROPIC_API_KEY` unset (key from the Keychain), execute +
+  demo write approval; the session log contains no trace of the key.
+- Decision recorded: ship only demo + Splunk for now (`docs/00-overview.md`).
+
 ## M3 — Kernel, bash, `SandboxBackend` (`none` only)
 
 - `loom.sandbox`: `SandboxBackend` / `SandboxProcess` protocols, `none` backend (own process

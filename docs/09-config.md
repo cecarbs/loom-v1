@@ -162,7 +162,7 @@ loom sandbox setup [--docker]
 loom secrets set|list|delete <name>
 loom models list             configured models with resolved capabilities
 loom models test <alias>     probe a model: reply, tool call, image; suggests capability settings
-loom tools list              show catalog
+loom tools list              show catalog (installed `loom.tools` entry points)
 loom trace <session-id>
 loom sessions                list sessions for cwd
 ```

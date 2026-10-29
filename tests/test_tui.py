@@ -273,7 +273,7 @@ def test_completer_commands_and_paths(tmp_path: Path) -> None:
         doc = Document(text, len(text))
         return [c.text for c in completer.get_completions(doc, CompleteEvent())]
 
-    assert complete("/mo") == ["model"]
+    assert complete("/mo") == ["mode", "model"]
     assert "quit" in complete("/q")
     assert complete("/model x") == []
     assert complete("look at @s") == ["src/"]
@@ -367,6 +367,34 @@ async def test_kernel_command_shows_inventory_and_resets(tmp_path: Path) -> None
         assert "Usage: /kernel [reset]" in out
     finally:
         await app.aclose()
+
+
+async def test_tools_and_mode_commands(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [])
+    _, out = await _command(app, "/tools")
+    assert "demo — Synthetic web logs" in out
+    _, out = await _command(app, "/tools ticket")
+    assert "demo.search_tickets(" in out and "[read]" in out
+
+    _, out = await _command(app, "/mode")
+    assert "Approval mode: ask" in out and "auto-write" in out
+    _, out = await _command(app, "/mode read-only")
+    assert app.mode == "read-only" and not app.agent.tool_ctx.workspace_writable
+    assert any(r["kind"] == "mode_change" for r in app.agent.log.read())
+    assert "read-only" in InlineUI(app, console=console(), source=Lines()).toolbar()
+    _, out = await _command(app, "/mode nope")
+    assert "Unknown mode 'nope'" in out and app.mode == "read-only"
+    await app.new_session()  # the mode carries over to new sessions
+    assert app.mode == "read-only"
+    await app.aclose()
+
+
+async def test_package_load_failures_are_shown_at_startup(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [])
+    app.notices = ["Tool package 'broken' failed to load: ImportError: nope"]
+    c = console()
+    await InlineUI(app, console=c, source=Lines()).run()
+    assert "Tool package 'broken' failed to load" in output(c)
 
 
 async def test_clear_shuts_down_the_old_kernel(tmp_path: Path) -> None:
