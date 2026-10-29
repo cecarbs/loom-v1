@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any, get_args
 
 from loom import __version__
-from loom.config import ApprovalMode, ConfigError, SandboxBackendName, load_config
+from loom.config import ApprovalMode, ConfigError, LoomConfig, SandboxBackendName, load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,5 +45,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for notice in loaded.notices:
         print(f"loom: {notice}", file=sys.stderr)
-    print("loom: interactive mode is not implemented yet.", file=sys.stderr)
-    return 1
+    try:
+        asyncio.run(_interactive(loaded.config))
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+    return 0
+
+
+async def _interactive(config: LoomConfig) -> None:
+    from loom.app import build_agent
+    from loom.core.events import EventBus
+    from loom.tui.basic import run_basic
+
+    bus = EventBus()
+    agent = build_agent(Path.cwd().resolve(), config, bus)
+    await run_basic(agent, bus)

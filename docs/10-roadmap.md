@@ -21,12 +21,14 @@ Acceptance: `uv run loom --version` works; config tests cover precedence, tighte
 ## M1 — Core loop
 Docs: 02, 03 (read/write/edit, budget), 07 (log format).
 - Canonical messages, event bus, `AgentLoop`, `FakeProvider`, `anthropic` adapter (streaming, prompt caching, thinking blocks preserved).
+- Minimal `openai_compat` adapter (streaming text + tool-call accumulation, tool messages, `base_url`, `extra_body`, `timeout_s`), pulled forward from M7 so day-to-day manual testing runs free against a local Ollama model. Profiles/capability shaping, `openai_responses`, the text tool-call fallback, headers and TLS options stay in M7.
+- Minimal `SecretStore` (env `LOOM_SECRET_<NAME>`, then the provider's env var / SDK credential chain); Keychain arrives in M4.
 - Minimal `ModelProfile` with the built-in `sonnet` profile (`claude-sonnet-5-5`; context window and pricing taken from Anthropic's docs). M7 generalises profiles.
 - Tools: `read`, `write`, `edit` with path policy and read-before-edit; output budget with spill files. Until M3 adds approval wiring, `read` outside the allowed roots or of sensitive paths returns an error.
 - Minimal append-only session JSONL writer (every message, model request, tool call).
 - Temporary plain-print UI (`loom.tui.basic`) to exercise the loop.
 
-Acceptance: scripted FakeProvider test performs read → edit → final answer; cancellation tests (mid-stream and mid-tool-batch) leave valid tool-use/result pairing as specified in `02-…`; budget test truncates a 200k-char result and spills it; a manual run against Anthropic edits a file.
+Acceptance: scripted FakeProvider test performs read → edit → final answer; cancellation tests (mid-stream and mid-tool-batch) leave valid tool-use/result pairing as specified in `02-…`; budget test truncates a 200k-char result and spills it; adapter tests replay recorded SSE streams (Anthropic and OpenAI-compatible) through mocked HTTP; a manual run against a local Ollama model edits a file; one short manual run against Anthropic (`sonnet`) edits a file.
 
 ## M2 — Inline TUI
 Docs: 06.
@@ -76,7 +78,7 @@ Acceptance: a session resumes with identical history; compaction triggers at the
 ## M7 — More providers, model profiles, capabilities
 Docs: 02 (adapters, model profiles, text tool-call fallback, headers), 09 (model entry reference).
 - `ModelProfile` / `ModelCapabilities`, built-in profiles (`providers/profiles.py`), capability-driven request shaping (images, thinking, cache hints, parallel calls, streaming, `system_role`).
-- `openai_compat` adapter (streaming tool-call accumulation, tool messages, no thinking replay).
+- `openai_compat` adapter: complete it (capability shaping, `system_role`, images in tool results, no thinking replay); the streaming core landed in M1.
 - `openai_responses` adapter (function_call items, encrypted reasoning items replayed statelessly).
 - Text tool-call fallback for `tools = false` models.
 - Custom `headers` (with `secret:` values), `extra_body` (with reserved-key validation), `timeout_s`, `verify_tls`, `ca_bundle`.

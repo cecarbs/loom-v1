@@ -55,8 +55,8 @@ class CapabilitiesEntry(_Model):
 
 
 class ThinkingEntry(_Model):
-    budget_tokens: int | None = Field(default=None, gt=0)
-    effort: Literal["low", "medium", "high"] | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    budget_tokens: int | None = Field(default=None, gt=0)  # older models only
 
 
 class PricingEntry(_Model):

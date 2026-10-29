@@ -1,3 +1,4 @@
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -32,11 +33,13 @@ def test_module_entry_point_version() -> None:
     assert result.stdout.strip() == f"loom {__version__}"
 
 
-def test_no_args_reports_not_implemented(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
+def test_interactive_exits_cleanly_on_eof(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main([]) == 1
-    assert "not implemented" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert main([]) == 0
+    assert "loom · sonnet" in capsys.readouterr().out
+    assert list((isolated.parent / "home" / ".loom" / "sessions").glob("*/*/session.jsonl"))
 
 
 def test_config_error_exits_2(isolated: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -44,8 +47,11 @@ def test_config_error_exits_2(isolated: Path, capsys: pytest.CaptureFixture[str]
     assert "unknown model alias 'nope'" in capsys.readouterr().err
 
 
-def test_project_notices_printed(isolated: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_project_notices_printed(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     (isolated / ".loom").mkdir()
     (isolated / ".loom" / "config.toml").write_text('[approvals]\nmode = "yolo"\n')
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     main([])
     assert "approvals.mode (would loosen 'ask' to 'yolo')" in capsys.readouterr().err

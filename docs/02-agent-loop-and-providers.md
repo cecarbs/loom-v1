@@ -29,7 +29,8 @@ class Message:
 
 Rules:
 - Tool results are carried in a `user` message (Anthropic style). The OpenAI adapter converts them to `role="tool"` messages. Tool messages can't carry images in Chat Completions, so image parts of a tool result go into a user message right after the tool messages (or are replaced by a text notice when `images = false`).
-- `ThinkingBlock`s are kept verbatim and replayed only to the same provider (Anthropic requires signed thinking blocks to be returned unchanged in tool-use turns). Other adapters drop them.
+- `ThinkingBlock`s are kept verbatim and replayed, unchanged, on every request to the adapter that produced them (`provider` field), including after switching between models of that provider: the Anthropic API silently drops blocks the current model can't read. Other adapters drop them.
+- **History is append-only.** Current Anthropic models bind thinking blocks to the exact conversation that produced them ("preserved thinking"); editing an earlier turn invalidates later thinking. Only compaction (M6) may rewrite history, and it does so by replacing a prefix with a summary, never by editing messages in place.
 - Every `ToolUseBlock` must be followed by a matching `ToolResultBlock` in the next message. On cancel, the loop inserts `ToolResultBlock(content="Interrupted by user", is_error=True)`.
 
 ## Provider interface (`loom.providers.base`)
@@ -48,7 +49,7 @@ class ModelRequest:
     messages: list[Message]
     tools: list[ToolSchema]        # name, description, JSON schema
     max_tokens: int
-    temperature: float | None = None
+    temperature: float | None = None   # never sent to Anthropic (current API rejects sampling params)
     thinking: ThinkingConfig | None = None
     cache: bool = True             # provider-specific prompt caching hints
 
@@ -60,18 +61,20 @@ ProviderEvent =
 
 @dataclass(frozen=True)
 class ThinkingConfig:              # adapters map to their own API shape
-    budget_tokens: int | None = None     # Anthropic-style budget
-    effort: Literal["low", "medium", "high"] | None = None   # OpenAI-style reasoning effort
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    budget_tokens: int | None = None     # only for older models that still take a fixed budget
 ```
 
-Thinking is enabled per model in config (`[models.<alias>] thinking = { budget_tokens = 8000 }`); the loop passes `profile.thinking` in every request when `capabilities.thinking` is true.
+Thinking is configured per model (`[models.<alias>] thinking = { effort = "medium" }`); the loop passes `profile.thinking` in every request when `capabilities.thinking` is true. `None` means "provider default", which is **not** necessarily "off": current Anthropic models (e.g. `claude-sonnet-5-5`) think adaptively by default and reject a fixed `budget_tokens`.
+
+Anthropic mapping: `effort` → `thinking={"type": "adaptive", "display": "summarized"}` + `output_config={"effort": …}`; `budget_tokens` → `thinking={"type": "enabled", "budget_tokens": …}` (older models only). `display: "summarized"` is always sent when thinking is configured so the TUI has something to show (the API default returns empty thinking text). OpenAI-compatible mapping: `effort` → `reasoning_effort` when the server supports it; otherwise ignored.
 
 ### Adapters
 
 | Adapter | SDK | Notes |
 |---|---|---|
-| `anthropic` | `anthropic` (async client, Messages streaming) | Prompt caching: `cache_control` on the system prompt, tool list, and the last user message. Preserve thinking blocks. |
-| `openai_compat` | `openai` (async client, Chat Completions streaming) | `base_url` configurable, so it covers OpenAI, OpenRouter, Ollama, vLLM, LM Studio, llama.cpp server. Accumulate streamed `tool_calls` deltas by index. The widest common denominator; the default for any non-Anthropic endpoint. |
+| `anthropic` | `anthropic` (async client, Messages streaming, SDK retries off: `max_retries=0`) | Prompt caching: two `cache_control` breakpoints, on the system prompt (tools render before it, so it covers them) and on the last block of the last message (max 4 allowed). Preserve thinking blocks. No `temperature`/`top_p`/`top_k`. Tool definitions don't set `eager_input_streaming`: with it the server stops validating tool input and a truncated string could still pass loom's schema check and be written to disk. Without an API key secret, the SDK's own credential chain is used (`ANTHROPIC_API_KEY`, `ant auth login` profile). |
+| `openai_compat` | `openai` (async client, Chat Completions streaming, `max_retries=0`) | `base_url` configurable, so it covers OpenAI, OpenRouter, Ollama, vLLM, LM Studio, llama.cpp server. Accumulate streamed `tool_calls` deltas by index. The widest common denominator; the default for any non-Anthropic endpoint. |
 | `openai_responses` | `openai` (async client, Responses API streaming) | For OpenAI models where reasoning features need the Responses API. Maps `function_call` / `function_call_output` items to `ToolUseBlock` / `ToolResultBlock`. Reasoning items are stored as `ThinkingBlock(provider="openai_responses", opaque=<item>)` and replayed only to this adapter (encrypted reasoning content via `include=["reasoning.encrypted_content"]` with `store=false`, so loom stays stateless and never depends on `previous_response_id`). |
 | `fake` | none | Scripted list of responses for tests; can emit tool calls. |
 
@@ -124,7 +127,7 @@ Behavior driven by capabilities:
 
 `system_role`: some servers/models reject a `system` message; the adapter then sends the system prompt as a `developer` message, or prepends it to the first user message.
 
-**Defaults:** built-in profiles for known providers (Anthropic models: images, thinking, prompt_cache true; OpenAI models: images true) live in `loom/providers/profiles.py`. The default model is `claude-sonnet-5-5` (alias `sonnet`). Built-in `pricing` and `context_window` values are copied from the provider's docs at implementation time, never guessed; when pricing is unknown, cost is shown as `—`. Unknown `openai_compat` models default to `tools=true`, `streaming=true`, `parallel_tool_calls=true`, everything else false; the user overrides per model in config. `loom models test <alias>` runs a short probe (plain reply, one tool call, optional image) and prints which capabilities actually work, suggesting config lines to add.
+**Defaults:** built-in profiles for known providers (Anthropic models: images, thinking, prompt_cache true; OpenAI models: images true) live in `loom/providers/profiles.py`. The default model is `claude-sonnet-5-5` (alias `sonnet`): 1M context window, 128K max output (loom requests 64K), $2 / $10 / $0.20 / $2.50 per MTok (input / output / cache read / 5-minute cache write = 1.25 × input), per Anthropic's model table as of 2026-10. Because the context window is 1M, `compact_at = 0.75` means turns can reach ~750K input tokens (~$1.50 each uncached); users who care about cost should lower `context_window` for this alias. Built-in `pricing` and `context_window` values are copied from the provider's docs at implementation time, never guessed; when pricing is unknown, cost is shown as `—`. Unknown `openai_compat` models default to `tools=true`, `streaming=true`, `parallel_tool_calls=true`, everything else false; the user overrides per model in config. `loom models test <alias>` runs a short probe (plain reply, one tool call, optional image) and prints which capabilities actually work, suggesting config lines to add.
 
 ### Text tool-call fallback (models without native tool calling)
 
@@ -164,6 +167,9 @@ async def run_turn(self, user_input: str, attachments: list[Block] = ()) -> None
         calls = [b for b in msg.content if isinstance(b, ToolUseBlock)]
         if not calls:
             break
+        if msg.meta["stop_reason"] == "max_tokens":   # tool input may be truncated
+            self.history.append(Message("user", truncated_results(calls)))  # error results, not run
+            continue
         results = await self.tools.run_all(calls)    # sequential by default
         self.history.append(Message("user", results))
     else:

@@ -22,16 +22,16 @@ default_model = "sonnet"
 [models.sonnet]                    # also a built-in profile; shown here for illustration
 provider = "anthropic"
 model = "claude-sonnet-5-5"        # check provider docs for current IDs
-context_window = 200000            # set from provider docs
-max_tokens = 16000
-thinking = { budget_tokens = 8000 }   # omit to disable thinking
-# pricing = { input = 0.0, output = 0.0, cache_read = 0.0, cache_write = 0.0 }  # USD per MTok, from provider docs
+context_window = 1000000           # built-in; lower it to compact earlier and cap per-turn cost
+max_tokens = 64000
+thinking = { effort = "medium" }   # omit for the provider default (Sonnet 5.5 thinks adaptively anyway)
+# pricing = { input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.50 }  # USD per MTok (built-in)
 
 [models.local]
 provider = "openai_compat"
 base_url = "http://localhost:11434/v1"   # Ollama
-model = "<local-model-id>"
-context_window = 32768
+model = "qwen3:8b"                       # any tool-capable model you've pulled
+context_window = 32768                    # must match num_ctx below
 timeout_s = 900                           # slow local hardware
 # no api_key_secret: local servers need no auth
 [models.local.capabilities]
@@ -39,7 +39,8 @@ tools = true                              # set false to use the text tool-call 
 images = false
 parallel_tool_calls = false
 [models.local.extra_body]
-options = { num_ctx = 32768 }             # Ollama-specific; passed through as-is
+options = { num_ctx = 32768 }             # Ollama-specific, REQUIRED: Ollama's default context is small and
+                                          # silently truncates the system prompt and tools
 
 [models.gpt]
 provider = "openai_responses"             # or "openai_compat" for Chat Completions
@@ -141,7 +142,7 @@ log_tool_results = false
 | `verify_tls` | bool | true | |
 | `ca_bundle` | path | none | Custom CA for self-hosted endpoints |
 | `capabilities.*` | bool/str | see `02-…providers.md` | `tools`, `parallel_tool_calls`, `images`, `thinking`, `prompt_cache`, `streaming`, `system_role` |
-| `thinking` | table | none (off) | `budget_tokens` and/or `effort` (`low`/`medium`/`high`); ignored with a notice if `capabilities.thinking` is false |
+| `thinking` | table | none (provider default) | `effort` (`low`/`medium`/`high`/`xhigh`/`max`) or, for older models only, `budget_tokens`; ignored with a notice if `capabilities.thinking` is false |
 | `pricing` | table | built-in profile, else none | `input`, `output`, `cache_read`, `cache_write` in USD per MTok; none → cost shown as `—` |
 | `headers` | table | {} | Values may be `"secret:<name>"` |
 | `extra_body` | table | {} | Merged into the request body; may not set `model`, `messages`, `tools`, `stream` |

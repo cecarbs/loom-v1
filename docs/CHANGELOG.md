@@ -1,5 +1,21 @@
 # Changelog
 
+## M1 — Core loop
+
+- Canonical messages, event bus, `AgentLoop` (retries with backoff, step limit, usage/cost
+  accounting, cancellation history repair, `max_tokens` tool calls not run), `FakeProvider`.
+- `anthropic` adapter: streaming, two cache breakpoints (system, last message), adaptive thinking
+  via `effort`, thinking blocks replayed verbatim, no sampling params, SDK retries off.
+- `openai_compat` adapter (pulled forward from M7 for free local testing with Ollama): streaming
+  text, tool-call accumulation, `reasoning` deltas, tool messages, `extra_body`, invalid-JSON args.
+- Built-in `sonnet` profile (`claude-sonnet-5-5`, 1M context, pricing) and profile resolution.
+- Tools `read` / `write` / `edit` with path policy, read-before-write/edit, CRLF-preserving edits;
+  output budget with spill files; minimal env-only `SecretStore`.
+- Session dir + append-only JSONL log; temporary plain-print UI (`loom.tui.basic`).
+- Docs updated for the current Claude API: `budget_tokens` rejected on Sonnet 5.5 (use
+  `effort`), no `temperature`, append-only history (preserved thinking), 1M context cost note.
+- `write` also refuses to overwrite a file that changed since it was read (same rule as `edit`).
+
 ## M0 — Skeleton
 
 - `uv` project (Python 3.12 pinned), `src/loom` layout, `loom` entry point, ruff/pyright/pytest config.

@@ -72,7 +72,7 @@ Returns `cat -n` style numbered lines. Long lines cut at 2,000 chars. PNG/JPEG/G
 path: str
 content: str
 ```
-Overwriting an existing file requires that it was `read` in this session (else error: "Read the file first"). Creates parent dirs. Emits a diff in `meta` for the TUI. After a successful `write` or `edit`, the file's new mtime+hash replaces its read-set entry, so consecutive edits don't need a re-read.
+Overwriting an existing file requires that it was `read` in this session and is unchanged since (else error: "Read the file first" / "changed since you last read it"). Creates parent dirs. Emits a diff in `meta` for the TUI. After a successful `write` or `edit`, the file's new mtime+hash replaces its read-set entry, so consecutive edits don't need a re-read.
 
 ### `edit`
 ```

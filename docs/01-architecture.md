@@ -128,6 +128,7 @@ loom/
     __main__.py
     cli.py
     config.py
+    app.py              # wires config, provider, tools, session into an AgentLoop (shared by UIs)
     core/
       agent.py          # AgentLoop
       messages.py       # canonical message + block types
@@ -147,6 +148,7 @@ loom/
     tools/
       base.py           # Tool protocol, ToolResult
       budget.py         # output budget + spill files
+      paths.py          # path policy (shared sensitive-path list) + read set
       builtin/{read,write,edit,bash,execute,search_tools}.py
     kernel/
       protocol.py       # message dataclasses (host side)
@@ -171,6 +173,7 @@ loom/
     extensions/{api,loader}.py
     agents/subagent.py
     tui/{app,input,render,approvals,commands}.py
+    tui/basic.py        # temporary plain-print UI (M1), removed in M2
   packages/
     loom-tools-splunk/
     loom-tools-demo/    # synthetic data, used by tests

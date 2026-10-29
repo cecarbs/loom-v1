@@ -49,7 +49,7 @@ Resume (`loom -c` for latest, `loom --resume <id>`) rebuilds history from `messa
   1. Keep the last `keep_recent_turns` (default 3) user turns verbatim.
   2. Ask the current model to summarize everything older with a fixed compaction prompt: goal, decisions, files touched, findings, open questions, next steps.
   3. Fetch the **kernel inventory** and append it to the summary ("Variables available in the kernel: rows (list, len=48211), df (DataFrame, 48211x7) …"), so the model keeps using in-memory data instead of re-fetching.
-  4. Replace older messages with one user message: `<summary>…</summary>`. Ensure tool-use/result pairs are never split.
+  4. Replace older messages with one user message: `<summary>…</summary>`. Ensure tool-use/result pairs are never split. This prefix replacement is the only history rewrite loom performs (see "append-only" in `02-…`); messages after the cut stay byte-identical so their thinking blocks remain valid.
 - `/compact <instructions>` runs it manually with extra focus instructions.
 
 The kernel is effectively a second, larger memory: the prompt tells the model to store intermediate results in named variables.
