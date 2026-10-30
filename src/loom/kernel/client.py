@@ -7,9 +7,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import shutil
 import signal
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -130,7 +132,10 @@ class KernelClient:
         sandbox_dir = self.session.sandbox_dir
         sandbox_dir.mkdir(parents=True, exist_ok=True)
         runner = sandbox_dir / "runner.py"
-        shutil.copyfile(RUNNER_PATH, runner)
+        # Atomic: a sub-agent's kernel may be starting from this file right now.
+        partial = sandbox_dir / f".runner-{uuid.uuid4().hex}"
+        shutil.copyfile(RUNNER_PATH, partial)
+        os.replace(partial, runner)
 
         self._was_ready = False
         self._expected_exit = False

@@ -121,7 +121,7 @@ allowed_indexes = ["web", "app"]
 include_claude = false
 
 [agents]
-max_concurrency = 4
+max_concurrency = 4                # sub-agents running at once, across all agents.* calls
 
 [tracing]
 otlp_endpoint = ""                 # OTLP/HTTP, e.g. http://localhost:6006/v1/traces; needs loom[otel]

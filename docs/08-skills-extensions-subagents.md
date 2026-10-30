@@ -90,11 +90,13 @@ results = agents.map(
 )
 ```
 
-- Stubs call the broker (`agents.run` is a broker tool with effect `read`; it inherits the parent's approval mode). `agents.*` calls are exempt from `[broker] call_timeout_s` and pause the parent's `execute` timeout clock; they are bounded by `max_turns` (default 15) instead.
-- Each sub-agent is a headless `AgentLoop` with: its own history, its **own fresh kernel** (same sandbox backend), the same tool catalog, an optional `model=` alias override, and a system prompt suffix telling it to return a concise final answer.
-- Approval requests from sub-agents bubble up to the TUI, labelled with the sub-agent id.
-- Depth limit 1 (sub-agents cannot spawn sub-agents). Max concurrency `[agents] max_concurrency` (default 4).
-- Returns the final assistant text (string). Full sub-agent transcripts are written to the parent session dir and referenced in the log.
+- Stubs call the broker (`agents.run` and `agents.map` are broker tools with effect `read`, in the internal `agents` package; `search_tools` and `/tools` list them, and `[approvals.overrides] "agents.run" = "deny"` turns them off). `agents.*` calls are exempt from `[broker] call_timeout_s` and pause the parent's `execute` timeout clock; they are bounded by `max_turns` (default 15, the sub-agent's model calls) instead.
+- Each sub-agent is a headless `AgentLoop` with: its own history, its **own fresh kernel** (same sandbox and session sandbox dir; started only if it uses `execute`), the same built-in tools and tool packages minus `agents`, the current model or an optional `model=` alias override, and a `# Sub-agent` system prompt section telling it to return a concise final answer. The task text is its only input: it sees neither the parent's history nor its variables. Its file edits are covered by the parent turn's checkpoint.
+- Sub-agents inherit the approval mode, overrides and "allow for this session" grants; a grant made in a sub-agent's prompt applies to the whole session. Extension hooks apply to them too (a `before_broker_call` guard binds sub-agents; `turn_finished` fires for their turns as well; `session_start` doesn't).
+- Approval requests from sub-agents bubble up to the TUI, labelled with the sub-agent id. Other sub-agent events stay on a private bus; the UI gets a notice when one starts, finishes or fails, plus its own notices prefixed with `[<id>]`.
+- Depth limit 1 (sub-agents cannot spawn sub-agents): their kernels have no `agents` stub and their brokers no `agents.*` tools. Max concurrency `[agents] max_concurrency` (default 4), across all calls; `agents.map(..., concurrency=n)` can only lower it.
+- `agents.run` returns the final assistant text (string) and raises `ToolError` if the sub-agent ends without one (model error, empty response, `max_turns` used up). `agents.map` returns a list of strings in task order; a failed sub-agent doesn't stop the others, its entry is `[sub-agent <id> failed: <reason>]`. Cancelling the parent turn stops every sub-agent and its kernel before the turn ends.
+- Full sub-agent transcripts are written to `<session_dir>/agents/<id>.jsonl` (ids `sa1`, `sa2`, …; same record kinds as `session.jsonl`) and referenced by a `subagent` entry in the parent log. The sandbox can't reach them; the `read` tool can, without approval. Their usage and cost count toward the session totals (also after a resume), not toward the parent's context size.
 
 ## MCP adapter (extension, later)
 

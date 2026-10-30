@@ -14,7 +14,7 @@
       lock                        # pid of the loom process using the session
       checkpoint.index            # this session's index for the shadow repo
       out/0001.txt …              # spilled tool outputs (sandbox: read-only)
-      agents/                     # sub-agent transcripts
+      agents/sa1.jsonl …          # sub-agent transcripts (same format as session.jsonl)
       sandbox/                    # the ONLY sandbox-writable part
         runner.py                 # copy of the kernel runner
         home/                     # sandbox HOME
@@ -45,6 +45,7 @@ Append-only JSONL, written only by the host process (never writable from the san
 | `session_resume` | like `session_start`, appended when a session is resumed |
 | `turn_end` / `turn_cancelled` | a turn finished (turn number) / was cancelled |
 | `network` | an allowlist-proxy connection attempt: method, host, port, allowed (or error) |
+| `subagent` | a sub-agent ended: id, status (done/failed/cancelled), model, steps, usage, cost, duration, transcript path |
 | `error`, `notice` | text |
 
 Resume (`loom -c` for latest, `loom --resume <id>` with an id or unique prefix, `/resume <id>` in the TUI) rebuilds history from `message` and `compaction` entries, plus turn count, token usage and cost (`model_request` entries carry `cost_usd`), checkpoints, and undelivered `note`s. It continues on the session's last model unless `--model` is given. The kernel does **not** survive restarts: if the session used it, the next prompt carries a note that the kernel is fresh. Not restored: "allow for this session" approval grants, the approval mode (comes from config/CLI), and the read set (files must be read again before `edit`). `model_request` entries also carry `purpose` (`turn` or `compaction`).
@@ -77,7 +78,7 @@ The kernel is effectively a second, larger memory: the prompt tells the model to
 
 ## Observability (`loom.tracing`)
 
-**Level 1 — built in:** the session JSONL is the trace. `loom.tracing.log.build_trace` turns its records into a span tree (turn → model calls and tool calls; an `execute` call → its kernel execution → the broker calls made during it, which is unambiguous because executions are serialized). Approvals, checkpoints, network attempts, kernel start/exit and errors are point events on the span they happened in. `loom trace [<session-id>] [--last N] [--code]` (default: the latest session) prints it:
+**Level 1 — built in:** the session JSONL is the trace. `loom.tracing.log.build_trace` turns its records into a span tree (turn → model calls and tool calls; an `execute` call → its kernel execution → the broker calls made during it, which is unambiguous because executions are serialized). Approvals, checkpoints, network attempts, sub-agents (`subagent` records, which point to the transcript), kernel start/exit and errors are point events on the span they happened in. A sub-agent's own requests and tool calls are in its transcript, not in the parent's trace. `loom trace [<session-id>] [--last N] [--code]` (default: the latest session) prints it:
 
 ```
 turn 3  "why did checkout errors spike"            14.2s  $0.06

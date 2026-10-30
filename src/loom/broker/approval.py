@@ -11,6 +11,7 @@ logged.
 from __future__ import annotations
 
 import asyncio
+import copy
 import itertools
 from dataclasses import dataclass
 from typing import Literal
@@ -70,8 +71,18 @@ class Approvals:
         self.sandboxed = sandboxed
         self.bus = bus
         self.log = session_log
+        self.agent_id: str | None = None
         self._session_allowed: set[str] = set()
         self._ids = itertools.count(1)
+
+    def scoped(self, agent_id: str, session_log: SessionLog) -> Approvals:
+        """The approvals of a sub-agent: same mode, overrides, bus, "allow for session" grants
+        and request ids (they share the bus), but labelled and logged to its transcript. The
+        mode is copied: it only changes between turns, and sub-agents don't outlive a turn."""
+        scoped = copy.copy(self)
+        scoped.agent_id = agent_id
+        scoped.log = session_log
+        return scoped
 
     async def check(self, tool: str, access: Access, *, call_id: str = "") -> Decision:
         """Decide whether a call may run, asking the user if needed."""
@@ -114,7 +125,7 @@ class Approvals:
     async def _ask(self, tool: str, access: Access, call_id: str) -> Decision:
         effect = access.kind.replace("_", " ")
         preview = access.preview + (f"\n({access.reason})" if access.reason else "")
-        request = ApprovalRequested(f"a{next(self._ids)}", tool, preview, effect)
+        request = ApprovalRequested(f"a{next(self._ids)}", tool, preview, effect, self.agent_id)
         try:
             return await self.bus.request_approval(request)
         except asyncio.CancelledError:

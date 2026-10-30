@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loom import __version__
+from loom.agents.subagent import SUBAGENT_ROLE, ChildSpec, SubAgents
 from loom.broker.approval import Approvals
 from loom.broker.broker import ToolBroker
 from loom.broker.registry import ToolPackage, discover_packages
@@ -55,7 +57,7 @@ from loom.session.store import (
     release_lock,
 )
 from loom.skills.loader import Skill, discover_skills, skill_roots
-from loom.tools.base import ToolContext, ToolSet
+from loom.tools.base import Tool, ToolContext, ToolSet
 from loom.tools.budget import OutputBudget
 from loom.tools.builtin.bash import BashTool
 from loom.tools.builtin.edit import EditTool
@@ -69,6 +71,103 @@ ProviderFactory = Callable[[ModelProfile], Provider]
 
 if TYPE_CHECKING:
     from loom.tracing.otel import OtelExporter
+
+
+@dataclass(frozen=True)
+class _Session:
+    """What the main loop and its sub-agents have in common."""
+
+    workspace: Path
+    config: LoomConfig
+    info: SessionInfo
+    backend: SandboxBackend
+    env: dict[str, str]
+    secrets: SecretStore
+    budget: OutputBudget  # shared: spill files are numbered in one directory
+    extra_tools: Sequence[Tool]
+    read_roots: Sequence[Path]
+
+
+def _make_loop(
+    s: _Session,
+    *,
+    profile: ModelProfile,
+    provider: Provider,
+    bus: EventBus,
+    session_log: SessionLog,
+    hooks: Hooks,
+    approvals: Approvals,
+    broker: ToolBroker,
+    extras: PromptExtras | None,
+    max_steps: int,
+    guidance: Sequence[str] = (),
+    checkpoints: Checkpoints | None = None,
+    subagents: SubAgents | None = None,
+) -> AgentLoop:
+    """An agent loop with its own kernel, tool set and read set."""
+    config = s.config
+    workspace_writable = approvals.mode != "read-only"
+
+    async def handle_tool_call(
+        tool: str, args: object, call_id: str, clock: ExecClock
+    ) -> dict[str, Any]:
+        reply = await broker.call(tool, args, call_id=call_id, clock=clock)
+        return reply.message_for(call_id)
+
+    kernel = KernelClient(
+        s.backend,
+        s.info,
+        env=s.env,
+        bus=bus,
+        session_log=session_log,
+        settings={"repr_max": REPR_MAX, "out_max_chars": config.budget.max_chars},
+        workspace_writable=workspace_writable,
+        catalog=broker.catalog(),
+        tool_handler=handle_tool_call,
+    )
+    tools = ToolSet(
+        [
+            ReadTool(),
+            WriteTool(),
+            EditTool(),
+            BashTool(),
+            ExecuteTool(config.kernel.default_timeout_s),
+            SearchToolsTool(broker),
+            *s.extra_tools,
+        ],
+        s.budget,
+        session_log,
+        bus,
+        approvals,
+        s.secrets.redactor,
+        hooks,
+    )
+    tool_ctx = ToolContext(
+        workspace=s.workspace,
+        paths=PathPolicy(s.workspace, read_roots=list(s.read_roots)),
+        read_set=ReadSet(),
+        bus=bus,
+        model_accepts_images=profile.capabilities.images,
+        sandbox=s.backend,
+        sandbox_env=s.env,
+        kernel=kernel,
+        broker=broker,
+        workspace_writable=workspace_writable,
+        checkpoints=checkpoints,
+        subagents=subagents,
+    )
+    return AgentLoop(
+        provider=provider,
+        profile=profile,
+        tools=tools,
+        tool_ctx=tool_ctx,
+        context=ContextBuilder(profile, s.workspace, [*tools.names(), *guidance], extras=extras),
+        bus=bus,
+        session_log=session_log,
+        max_steps=max_steps,
+        context_config=config.context,
+        hooks=hooks,
+    )
 
 
 def build_agent(
@@ -98,7 +197,8 @@ def build_agent(
         model = state.model
     profile = resolve_profile(model or config.default_model, config)
     secrets = secrets or SecretStore()
-    provider = provider or (provider_factory or (lambda p: create_provider(p, secrets)))(profile)
+    make_provider = provider_factory or (lambda p: create_provider(p, secrets))
+    provider = provider or make_provider(profile)
     backend = backend or create_backend(config.sandbox, loom_home=home)
     if packages is None:
         packages, _ = discover_packages()
@@ -124,13 +224,70 @@ def build_agent(
     hooks = Hooks(extensions.hooks, bus=bus, session_log=session_log)
     backend.on_network = lambda event: session_log.append("network", **event)
 
-    env = sandbox_env(session, config.sandbox.env_passthrough)
-    workspace_writable = config.approvals.mode != "read-only"
     approvals = Approvals(
         config.approvals, sandboxed=backend.name != "none", bus=bus, session_log=session_log
     )
+    shared = _Session(
+        workspace,
+        config,
+        session,
+        backend,
+        sandbox_env(session, config.sandbox.env_passthrough),
+        secrets,
+        OutputBudget(config.budget, paths.out_dir),
+        extensions.tools,
+        [paths.out_dir, paths.agents_dir, *(s.directory for s in skills)],
+    )
+
+    def resolve_model(alias: str | None) -> tuple[ModelProfile, Provider]:
+        current = subagents.parent
+        assert current is not None
+        if alias is None or alias == current.profile.alias:
+            return current.profile, current.provider
+        if alias not in config.model_aliases():
+            known = ", ".join(sorted(config.model_aliases()))
+            raise ValueError(f"unknown model alias {alias!r} (defined: {known})")
+        resolved = resolve_profile(alias, config)
+        return resolved, make_provider(resolved)
+
+    def make_child(spec: ChildSpec) -> AgentLoop:
+        child_log = SessionLog(spec.transcript, secrets.redactor)
+        child_log.append(
+            "session_start",
+            session_id=f"{paths.id}/{spec.id}",
+            workspace=str(workspace),
+            model=spec.profile.alias,
+            provider=spec.profile.provider,
+            sandbox=backend.name,
+            mode=approvals.mode,
+            loom_version=__version__,
+        )
+        # Hooks and approvals report on the main bus: the user has to see those.
+        child_hooks = Hooks(extensions.hooks, bus=bus, session_log=child_log)
+        child_approvals = approvals.scoped(spec.id, child_log)
+        return _make_loop(
+            shared,
+            profile=spec.profile,
+            provider=spec.provider,
+            bus=spec.bus,
+            session_log=child_log,
+            hooks=child_hooks,
+            approvals=child_approvals,
+            broker=broker.scoped(child_approvals, child_log, child_hooks),
+            extras=replace(extras or PromptExtras(), role=SUBAGENT_ROLE),
+            max_steps=spec.max_turns,
+        )
+
+    subagents = SubAgents(
+        make_loop=make_child,
+        resolve_model=resolve_model,
+        agents_dir=paths.agents_dir,
+        bus=bus,
+        session_log=session_log,
+        max_concurrency=config.agents.max_concurrency,
+    )
     broker = ToolBroker(
-        packages,
+        [*packages, subagents.package()],
         approvals=approvals,
         secrets=secrets,
         session_log=session_log,
@@ -138,41 +295,6 @@ def build_agent(
         call_timeout_s=config.broker.call_timeout_s,
         log_results=config.tracing.log_tool_results,
         hooks=hooks,
-    )
-
-    async def handle_tool_call(
-        tool: str, args: object, call_id: str, clock: ExecClock
-    ) -> dict[str, Any]:
-        reply = await broker.call(tool, args, call_id=call_id, clock=clock)
-        return reply.message_for(call_id)
-
-    kernel = KernelClient(
-        backend,
-        session,
-        env=env,
-        bus=bus,
-        session_log=session_log,
-        settings={"repr_max": REPR_MAX, "out_max_chars": config.budget.max_chars},
-        workspace_writable=workspace_writable,
-        catalog=broker.catalog(),
-        tool_handler=handle_tool_call,
-    )
-    tools = ToolSet(
-        [
-            ReadTool(),
-            WriteTool(),
-            EditTool(),
-            BashTool(),
-            ExecuteTool(config.kernel.default_timeout_s),
-            SearchToolsTool(broker),
-            *extensions.tools,
-        ],
-        OutputBudget(config.budget, paths.out_dir),
-        session_log,
-        bus,
-        approvals,
-        secrets.redactor,
-        hooks,
     )
     checkpoints = Checkpoints(
         workspace,
@@ -182,31 +304,22 @@ def build_agent(
         session_log,
         [Checkpoint(c["sha"], c["turn"], c["prompt"]) for c in state.checkpoints] if state else [],
     )
-    tool_ctx = ToolContext(
-        workspace=workspace,
-        paths=PathPolicy(workspace, read_roots=[paths.out_dir, *(s.directory for s in skills)]),
-        read_set=ReadSet(),
-        bus=bus,
-        model_accepts_images=profile.capabilities.images,
-        sandbox=backend,
-        sandbox_env=env,
-        kernel=kernel,
-        broker=broker,
-        workspace_writable=workspace_writable,
-        checkpoints=checkpoints,
-    )
-    agent = AgentLoop(
-        provider=provider,
+    agent = _make_loop(
+        shared,
         profile=profile,
-        tools=tools,
-        tool_ctx=tool_ctx,
-        context=ContextBuilder(profile, workspace, tools.names(), extras=extras),
+        provider=provider,
         bus=bus,
         session_log=session_log,
-        max_steps=config.agent.max_steps,
-        context_config=config.context,
         hooks=hooks,
+        approvals=approvals,
+        broker=broker,
+        extras=extras,
+        max_steps=config.agent.max_steps,
+        guidance=["agents"],
+        checkpoints=checkpoints,
+        subagents=subagents,
     )
+    subagents.parent = agent
     if state is not None:
         agent.restore(state)
     return agent
@@ -390,8 +503,14 @@ class App:
             SessionStart(self.session_id, self.workspace, self.profile.alias, self.resumed),
         )
 
-    async def aclose(self) -> None:
+    async def _stop_kernels(self) -> None:
+        subagents = self.agent.tool_ctx.subagents
+        if subagents is not None:
+            await subagents.aclose()
         await self.kernel.shutdown()
+
+    async def aclose(self) -> None:
+        await self._stop_kernels()
         await self.backend.stop()
         if self.tracer is not None:
             await asyncio.to_thread(self.tracer.shutdown)  # flushes the last spans
@@ -421,7 +540,7 @@ class App:
 
     async def _switch(self, build: Callable[[], AgentLoop]) -> None:
         old = self.session_paths
-        await self.kernel.shutdown()
+        await self._stop_kernels()
         await self.backend.stop()
         release_lock(old)
         try:

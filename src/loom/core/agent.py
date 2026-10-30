@@ -116,6 +116,14 @@ class AgentLoop:
         self.pending_notes.append(text)
         self.log.append("note", text=text)
 
+    async def add_usage(self, usage: Usage, cost: float | None) -> None:
+        """Count requests made elsewhere (a sub-agent) toward the session totals. They don't
+        change this conversation's context size."""
+        self.usage = self.usage + usage
+        if cost is not None:
+            self.cost_usd = (self.cost_usd or 0.0) + cost
+        await self._emit_usage()
+
     @property
     def context_pct(self) -> float:
         return self.context_tokens() / self.profile.context_window

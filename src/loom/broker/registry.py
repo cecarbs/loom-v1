@@ -45,6 +45,7 @@ class ToolSpec:
     signature: inspect.Signature  # without ctx
     doc: str
     args_model: type[BaseModel]
+    unbounded: bool = False  # no broker timeout; pauses the execute clock (agents.*)
 
     @property
     def qualname(self) -> str:
@@ -83,21 +84,22 @@ class ToolPackage:
     config_keys: list[str] = field(default_factory=list)
     tools: dict[str, ToolSpec] = field(default_factory=dict)
     clients: dict[str, ClientFactory] = field(default_factory=dict)
+    internal: bool = False  # loom's own (may use a reserved name; sub-agents don't get it)
 
     def __post_init__(self) -> None:
         name = self.name
         if not name.isidentifier() or name.startswith("_") or keyword.iskeyword(name):
             raise PackageError(f"package name {name!r} must be a public Python identifier")
-        if name in RESERVED_NAMES:
+        if name in RESERVED_NAMES and not self.internal:
             raise PackageError(f"package name {name!r} is reserved")
 
-    def tool(self, *, effect: Effect) -> Callable[[F], F]:
+    def tool(self, *, effect: Effect, unbounded: bool = False) -> Callable[[F], F]:
         """Register a tool function. Its first parameter receives the broker's context."""
         if effect not in get_args(Effect):
             raise PackageError(f"effect must be one of {get_args(Effect)}, not {effect!r}")
 
         def register(func: F) -> F:
-            spec = make_spec(self.name, func, effect)
+            spec = make_spec(self.name, func, effect, unbounded=unbounded)
             if spec.name in self.tools:
                 raise PackageError(f"{spec.qualname} is defined twice")
             self.tools[spec.name] = spec
@@ -122,7 +124,9 @@ class ToolPackage:
         return register
 
 
-def make_spec(package: str, func: Callable[..., Any], effect: Effect) -> ToolSpec:
+def make_spec(
+    package: str, func: Callable[..., Any], effect: Effect, *, unbounded: bool = False
+) -> ToolSpec:
     name = func.__name__
     where = f"{package}.{name}"
     if name.startswith("_"):
@@ -167,6 +171,7 @@ def make_spec(package: str, func: Callable[..., Any], effect: Effect) -> ToolSpe
         signature=inspect.Signature(cleaned, return_annotation=returns),
         doc=inspect.cleandoc(func.__doc__ or ""),
         args_model=args_model,
+        unbounded=unbounded,
     )
 
 

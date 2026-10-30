@@ -25,6 +25,12 @@ TOOL_GUIDANCE: dict[str, str] = {
         "Aggregate in the source system and in code; print summaries, never raw bulk data."
     ),
     "search_tools": "- Use `search_tools` to find kernel functions before calling them.",
+    "agents": (
+        "- In `execute`, `agents.run(task)` and `agents.map(tasks)` hand self-contained tasks to "
+        "sub-agents, which have their own history and kernel and return their final answer as "
+        "a string. Use them to split independent work or keep bulky exploration out of this "
+        "conversation; put everything they need in the task text."
+    ),
     "read": "- Use `read` to view files. Read a file before editing or overwriting it.",
     "edit": (
         "- Use `edit` for targeted changes; `old_string` must match exactly once, so include "
@@ -50,6 +56,7 @@ class PromptExtras:
     skill_lines: Sequence[str] = ()
     notices: list[str] = field(default_factory=list)
     network: str = ""  # rendered "# Network" section (allowlist mode only)
+    role: str = ""  # rendered section for a sub-agent, last in the prompt
 
 
 def context_file_paths(workspace: Path, home: Path) -> list[Path]:
@@ -129,6 +136,8 @@ def render_system_prompt(
             sections.append(extras.context_files)
         if extras.skill_lines:
             sections.append("\n".join(["# Skills", SKILLS_INTRO, *extras.skill_lines]))
+        if extras.role:
+            sections.append(extras.role)
     return "\n\n".join(sections)
 
 

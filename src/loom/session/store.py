@@ -43,6 +43,10 @@ class SessionPaths:
         return self.root / "sandbox"
 
     @property
+    def agents_dir(self) -> Path:
+        return self.root / "agents"
+
+    @property
     def lock(self) -> Path:
         return self.root / "lock"
 
@@ -261,6 +265,13 @@ def rebuild(records: Iterator[dict[str, Any]] | list[dict[str, Any]]) -> Resumed
                 state.usage = state.usage + request
                 if record.get("purpose") != "compaction":
                     state.last_prompt_tokens = request.prompt_tokens
+                if (cost := record.get("cost_usd")) is not None:
+                    state.cost_usd = (state.cost_usd or 0.0) + cost
+            case "subagent":  # its requests are in its transcript; the totals count here
+                usage = record.get("usage") or {}
+                state.usage = state.usage + Usage(
+                    **{k: usage.get(k, 0) for k in Usage.__dataclass_fields__}
+                )
                 if (cost := record.get("cost_usd")) is not None:
                     state.cost_usd = (state.cost_usd or 0.0) + cost
             case "kernel_start" | "kernel_execute":

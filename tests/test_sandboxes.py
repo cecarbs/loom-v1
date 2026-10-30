@@ -1,5 +1,6 @@
 """M5 acceptance: the real sandboxes, from both `bash` and `execute` (docs/05, docs/10)."""
 
+import asyncio
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -16,6 +17,7 @@ from loom.core.messages import TextBlock, ToolResultBlock, ToolUseBlock
 from loom.providers.fake import FakeProvider
 from loom.sandbox.base import SandboxBackend, SessionInfo
 from loom.sandbox.seatbelt import SeatbeltBackend
+from loom.session.store import SessionLog
 
 IMAGE = "loom-sandbox:latest"
 
@@ -196,6 +198,59 @@ async def test_broker_tools_and_inventory_survive_across_calls(box: Sandboxed) -
     assert out.startswith("Counter(")
     names = {v.name for v in await box.kernel.inventory()}
     assert "rows" in names
+
+
+async def test_sub_agent_kernel_is_sandboxed_and_its_transcript_is_out_of_reach(
+    box: Sandboxed,
+) -> None:
+    w, s = box.world, box.session
+    transcript = s.session_dir / "agents" / "sa1.jsonl"
+    probe = (
+        "open('from_child.txt', 'w').write('c')\n"
+        f"try:\n    open({str(transcript)!r}, 'a').write('x')\n    print('WROTE')\n"
+        "except OSError:\n    print('denied')\n"
+    )
+    box.provider._script.extend(
+        [
+            [ToolUseBlock("p1", "execute", {"code": "print(agents.run('probe'))"})],
+            [ToolUseBlock("c1", "execute", {"code": probe})],
+            [TextBlock("child finished")],
+            [TextBlock("ok")],
+        ]
+    )
+    await box.agent.run_turn("go")
+    result = box.agent.history[-2].content[0]
+    assert isinstance(result, ToolResultBlock) and "child finished" in str(result.content)
+    assert (w.workspace / "from_child.txt").read_text() == "c"
+    records = SessionLog(transcript).read()
+    result = next(r["result"] for r in records if r["kind"] == "tool_result")
+    assert "denied" in result and "WROTE" not in result
+
+
+async def test_cancel_stops_a_busy_sub_agent_kernel(box: Sandboxed) -> None:
+    box.provider._script.extend(
+        [
+            [ToolUseBlock("p1", "execute", {"code": "agents.run('sleep')"})],
+            [ToolUseBlock("c1", "execute", {"code": "import time\ntime.sleep(300)"})],
+        ]
+    )
+    subagents = box.agent.tool_ctx.subagents
+    assert subagents is not None
+    turn = asyncio.create_task(box.agent.run_turn("go"))
+    kernel = None
+    async with asyncio.timeout(30):
+        while kernel is None or kernel.state != "busy":
+            await asyncio.sleep(0.05)
+            for loop, _ in subagents._active.values():
+                kernel = loop.tool_ctx.kernel
+    await asyncio.sleep(0.5)  # inside time.sleep
+    turn.cancel()
+    await asyncio.wait_for(turn, 20)
+    assert kernel is not None and not kernel.alive
+    assert not subagents._active
+    assert [r["status"] for r in box.agent.log.read() if r["kind"] == "subagent"] == ["cancelled"]
+    # The sandbox still works for the parent.
+    assert "still here" in await box.py("print('still here')")
 
 
 async def test_children_run_in_their_own_process_group(box: Sandboxed) -> None:

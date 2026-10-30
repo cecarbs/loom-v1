@@ -9,7 +9,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ValidationError
 
@@ -26,6 +26,9 @@ from loom.session.checkpoints import CheckpointError, Checkpoints
 from loom.session.store import SessionLog
 from loom.tools.budget import OutputBudget
 from loom.tools.paths import PathPolicy, ReadSet
+
+if TYPE_CHECKING:
+    from loom.agents.subagent import SubAgents
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +57,7 @@ class ToolContext:
     broker: ToolBroker | None = None
     workspace_writable: bool = True
     checkpoints: Checkpoints | None = None
+    subagents: SubAgents | None = None
 
 
 class Tool(Protocol):

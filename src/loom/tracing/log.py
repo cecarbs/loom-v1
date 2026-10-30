@@ -449,6 +449,10 @@ def _event_label(span: Span) -> str:
             return f"kernel killed: {a.get('reason')}"
         case "kernel_interrupt":
             return "kernel interrupt"
+        case "subagent":
+            cost = f"  ${a['cost_usd']:.4f}" if a.get("cost_usd") else ""
+            where = a.get("transcript") or a.get("error")
+            return f"subagent {a.get('id')} {a.get('status')}{cost}  {where}"
         case "model_switch":
             return f"model switch {a.get('old')} → {a.get('new')}"
         case "mode_change":

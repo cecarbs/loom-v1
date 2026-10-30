@@ -70,7 +70,7 @@ Because the prompt is inactive during a turn, typing ahead/steering is not suppo
   [y] allow once   [a] allow this tool for session   [n] deny   [m] deny with message
 ```
 
-Single-key answer via a short prompt_toolkit key-binding app. Calls `bus.respond(request_id, Decision)`. Unanswered approvals never auto-allow. Concurrent requests are queued and shown one at a time; requests from sub-agents are prefixed with the sub-agent id.
+Single-key answer via a short prompt_toolkit key-binding app. Calls `bus.respond(request_id, Decision)`. Unanswered approvals never auto-allow. Concurrent requests are queued and shown one at a time; requests from sub-agents are prefixed with the sub-agent id. While any prompt is up or queued, the live region stays down and notices are held back, then printed when the last prompt is answered.
 
 ## Keys
 

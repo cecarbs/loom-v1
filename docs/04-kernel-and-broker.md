@@ -90,7 +90,7 @@ ns = {"__name__": "__loom__", "_out": {}}
 # On init: build stub modules from the catalog and insert into ns and sys.modules:
 #   ns["splunk"] = <module splunk with function search(...)>
 #   ns["tools"]  = namespace object with all packages
-#   ns["agents"] = stub for sub-agents (M10)
+#   ns["agents"] = stub for sub-agents, from the internal `agents` package (main kernel only)
 
 def execute(code):
     tree = ast.parse(code, mode="exec")

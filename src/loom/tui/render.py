@@ -80,6 +80,8 @@ class Renderer:
         self._region: Region | None = None
         self._buffer: list[str] = []
         self._live: Live | None = None
+        self._suspended = 0  # prompts holding the terminal (sub-agents can queue several)
+        self._deferred: list[Text] = []  # printed once the prompts are done
 
     @property
     def active(self) -> bool:
@@ -116,11 +118,9 @@ class Renderer:
                     Text(f"· Compacted: ~{before:,} → ~{after:,} tokens", style="dim")
                 )
             case ev.Notice(text):
-                self.close()
-                self.console.print(Text(f"· {text}", style="yellow"))
+                self._line(Text(f"· {text}", style="yellow"))
             case ev.ErrorEvent(text):
-                self.close()
-                self.console.print(Text(f"✗ {text}", style="red"))
+                self._line(Text(f"✗ {text}", style="red"))
             case ev.UsageUpdated(context_pct=pct, cost_usd=cost):
                 self.status.context_pct = pct
                 self.status.cost_usd = cost
@@ -131,6 +131,15 @@ class Renderer:
                 self.close()
                 if not self.console.is_terminal:  # no toolbar when piped; print the status
                     self.console.print(Text(status_line(self.status), style="dim"))
+
+    def _line(self, text: Text) -> None:
+        """Print a notice, unless a prompt has the terminal: while sub-agents run, these can
+        arrive at any time."""
+        if self._suspended:
+            self._deferred.append(text)
+            return
+        self.close()
+        self.console.print(text)
 
     # --- the live region ---------------------------------------------------------
 
@@ -192,15 +201,22 @@ class Renderer:
 
         Resuming uses a new Live: a restarted one remembers its old height and would move
         the cursor up over whatever the prompt printed."""
-        live = self._live
-        if live is not None:
-            live.stop()
+        if self._live is not None:
+            self._live.stop()
             self._live = None
+        self._suspended += 1
         try:
             yield
         finally:
-            if live is not None and self._region is not None and self._live is None:
-                self._start_live()
+            self._suspended -= 1
+            if not self._suspended:
+                if self._deferred:
+                    self.close()
+                for text in self._deferred:
+                    self.console.print(text)
+                self._deferred = []
+                if self._region is not None and self._live is None:
+                    self._start_live()
 
     # --- tool calls --------------------------------------------------------------
 

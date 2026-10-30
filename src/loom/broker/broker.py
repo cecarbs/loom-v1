@@ -131,6 +131,18 @@ class ToolBroker:
             p.name: PackageContext(p, package_config.get(p.name, {}), secrets) for p in packages
         }
 
+    def scoped(self, approvals: Approvals, session_log: SessionLog, hooks: Hooks) -> ToolBroker:
+        """The broker of a sub-agent: same packages, config and cached clients, minus loom's
+        internal packages (so it can't reach `agents.*`, even by writing raw protocol
+        messages), with its own approvals, log and hooks."""
+        scoped = copy.copy(self)
+        scoped.approvals = approvals
+        scoped.log = session_log
+        scoped.hooks = hooks
+        scoped.packages = {n: p for n, p in self.packages.items() if not p.internal}
+        scoped.specs = {q: s for q, s in self.specs.items() if s.package in scoped.packages}
+        return scoped
+
     def catalog(self) -> list[dict[str, Any]]:
         return [p.catalog_entry() for p in self.packages.values()]
 
@@ -182,6 +194,9 @@ class ToolBroker:
             )
         if not decision.allowed:
             reply = ToolReply.error("PermissionDenied", self._denial(spec, decision))
+        elif spec.unbounded and clock is not None:
+            with clock.paused():
+                reply = await self._run(spec, kwargs)
         else:
             reply = await self._run(spec, kwargs)
         return reply, decision
@@ -210,7 +225,8 @@ class ToolBroker:
                 coro = spec.func(ctx, **kwargs)
             else:
                 coro = asyncio.to_thread(spec.func, ctx, **kwargs)
-            value = await asyncio.wait_for(coro, self.call_timeout_s)
+            timeout = None if spec.unbounded else self.call_timeout_s
+            value = await asyncio.wait_for(coro, timeout)
         except TimeoutError:
             return ToolReply.error(
                 "ToolTimeout", f"{spec.qualname} timed out after {self.call_timeout_s:g}s"

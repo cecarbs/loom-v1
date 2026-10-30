@@ -577,3 +577,42 @@ async def test_trace_command(tmp_path: Path) -> None:
     assert 'turn 2  "second"' in out and "turn 1" not in out
     _, out = await _command(app, "/trace x")
     assert "Usage: /trace [n]" in out
+
+
+class Gate:
+    """An approver that holds the terminal until released."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def ask(self, request: ev.ApprovalRequested) -> ev.Decision:
+        await self.release.wait()
+        return ev.Decision("allow_once")
+
+
+async def test_notices_wait_for_the_approval_prompt() -> None:
+    bus = ev.EventBus()
+    c = console()
+    gate = Gate()
+    bus.subscribe(Renderer(c, gate, bus))
+    ask = asyncio.create_task(bus.request_approval(REQUEST))
+    await asyncio.sleep(0)
+    await bus.emit(ev.Notice("sub-agent news"))
+    await bus.emit(ev.ErrorEvent("sub-agent trouble"))
+    assert "sub-agent" not in output(c)
+    gate.release.set()
+    await ask
+    assert "sub-agent news" in output(c) and "sub-agent trouble" in output(c)
+
+
+async def test_live_region_stays_down_until_the_last_queued_prompt() -> None:
+    c = console(terminal=True)
+    renderer = Renderer(c, Approve(), ev.EventBus())
+    await renderer(ev.ToolCallOutput("t", "running"))
+    assert renderer.active
+    with renderer.suspended():
+        with renderer.suspended():
+            assert not renderer.active
+        assert not renderer.active
+    assert renderer.active
+    renderer.close()

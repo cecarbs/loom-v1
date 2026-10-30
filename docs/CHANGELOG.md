@@ -1,5 +1,30 @@
 # Changelog
 
+## M10 — Sub-agents
+
+- `loom.agents.subagent`: `agents.run(task, model=, max_turns=)` and
+  `agents.map(tasks, concurrency=, model=, max_turns=)` in the kernel, as broker tools in the
+  internal `agents` package. Each sub-agent is a headless `AgentLoop` with its own history,
+  lazily started kernel, read set and private event bus. `app.py`'s loop assembly moved to
+  `_make_loop`, used for both the main loop and children.
+- `ToolPackage(internal=True)` (may use a reserved name; left out of sub-agents' brokers, which
+  enforces the depth limit) and `@package.tool(unbounded=True)` (no `call_timeout_s`, pauses the
+  `execute` clock).
+- `Approvals.scoped` / `ToolBroker.scoped`: a sub-agent shares the mode, overrides, session
+  grants, approval request ids, package clients and extension hooks, with its own log. Approval
+  requests go to the main bus with `agent_id` set.
+- Transcripts in `<session_dir>/agents/<id>.jsonl`; a `subagent` record in the parent log points
+  to each one and carries its usage, which counts toward session totals and resume but not the
+  parent's context size. `loom trace` shows it as a point event. The `read` tool can open
+  transcripts without approval; the sandbox can't reach them.
+- `agents.run` raises `ToolError` when a sub-agent ends without an answer; `agents.map` keeps the
+  other answers and returns `[sub-agent <id> failed: …]` for that entry.
+- Cancelling a turn stops all its sub-agents and their kernels before the turn ends;
+  `App.aclose` and session switches clean up anything left.
+- Fixes needed for concurrency: the kernel runner is copied atomically (a starting kernel could
+  read a half-written `runner.py`); the renderer keeps the live region down until the last queued
+  prompt is answered and holds notices back while a prompt is up.
+
 ## M9 — Tracing and network allowlist
 
 - `loom.tracing.log`: the session log as a span tree (turn → model / tool calls; `execute` →
