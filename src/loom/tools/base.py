@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from loom.broker.broker import ToolBroker
 from loom.broker.redact import Redactor
 from loom.core.events import EventBus, Notice, ToolCallFinished, ToolCallStarted
 from loom.core.messages import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
+from loom.extensions.api import Hooks, ToolCall
 from loom.kernel.client import KernelClient
 from loom.providers.base import INVALID_JSON_KEY, ToolSchema
 from loom.sandbox.base import SandboxBackend
@@ -86,6 +88,7 @@ class ToolSet:
         bus: EventBus,
         approvals: Approvals | None = None,
         redactor: Redactor | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self._tools = {t.name: t for t in tools}
         self._budget = budget
@@ -93,6 +96,7 @@ class ToolSet:
         self._bus = bus
         self.approvals = approvals
         self.redactor = redactor
+        self.hooks = hooks or Hooks()
 
     @property
     def budget(self) -> OutputBudget:
@@ -131,6 +135,8 @@ class ToolSet:
         start = time.monotonic()
 
         result = await self._execute(call, replace(ctx, call_id=call.id))
+        # Before redaction and the budget, so a hook can't put secrets or bulk into context.
+        await self.hooks.after("after_tool_call", ToolCall(call.id, call.name, call.input, result))
         if self.redactor is not None:
             result.text = self.redactor.text(result.text)
         kernel_ref = result.meta.get("kernel_ref")
@@ -172,8 +178,13 @@ class ToolSet:
             return ToolResult(
                 f"Unknown tool {call.name!r}. Available tools: {', '.join(self._tools)}.", True
             )
+        hooked, blocked = await self.hooks.before(
+            "before_tool_call", ToolCall(call.id, call.name, copy.deepcopy(call.input))
+        )
+        if blocked is not None:
+            return ToolResult(blocked.text, True)
         try:
-            args = tool.input_model.model_validate(call.input)
+            args = tool.input_model.model_validate(hooked.input)
         except ValidationError as e:
             problems = "\n".join(
                 f"  {'.'.join(str(p) for p in err['loc']) or '<args>'}: {err['msg']}"

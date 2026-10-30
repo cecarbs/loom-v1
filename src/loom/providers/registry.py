@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from loom.broker.secrets import SecretStore
 from loom.providers.base import Provider
@@ -37,13 +37,19 @@ PROVIDERS: dict[str, ProviderFactory] = {
 
 
 def create_provider(
-    profile: ModelProfile, secrets: SecretStore, *, text_tools: bool = True
+    profile: ModelProfile,
+    secrets: SecretStore,
+    *,
+    text_tools: bool = True,
+    extra: Mapping[str, ProviderFactory] | None = None,
 ) -> Provider:
-    """`text_tools`: wrap models without native tool calling in the text fallback."""
+    """`text_tools`: wrap models without native tool calling in the text fallback. `extra`:
+    providers registered by extensions (built-in names take precedence)."""
+    providers = {**(extra or {}), **PROVIDERS}
     try:
-        factory = PROVIDERS[profile.provider]
+        factory = providers[profile.provider]
     except KeyError:
-        known = ", ".join(sorted(PROVIDERS))
+        known = ", ".join(sorted(providers))
         raise ValueError(f"unknown provider {profile.provider!r} (known: {known})") from None
     provider = factory(profile, secrets)
     if text_tools and not profile.capabilities.tools:

@@ -21,6 +21,7 @@ from loom.core.messages import (
     interrupted_result,
     message_to_dict,
 )
+from loom.extensions.api import Hooks, TurnEnd
 from loom.providers import base as pv
 from loom.providers.profiles import ModelProfile
 from loom.session.store import ResumedState, SessionLog, first_line
@@ -57,6 +58,7 @@ class AgentLoop:
         session_log: SessionLog,
         max_steps: int = 50,
         context_config: ContextConfig | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self.provider = provider
         self.profile = profile
@@ -67,6 +69,7 @@ class AgentLoop:
         self.log = session_log
         self.max_steps = max_steps
         self.context_config = context_config or ContextConfig()
+        self.hooks = hooks or Hooks()
 
         self.history: list[Message] = []
         self.turns = 0
@@ -142,8 +145,10 @@ class AgentLoop:
             self._repair_after_cancel()
             self.log.append("turn_cancelled")
             await self.bus.emit(ev.TurnCancelled())
+            await self.hooks.after("turn_finished", TurnEnd(self.usage, cancelled=True))
             return
         await self.bus.emit(ev.TurnFinished(self.usage))
+        await self.hooks.after("turn_finished", TurnEnd(self.usage))
 
     async def _steps(self) -> None:
         for _ in range(self.max_steps):
@@ -236,6 +241,11 @@ class AgentLoop:
         """Stream one model response. A `compaction` request isn't shown or repaired on
         cancel. With `on_overflow="signal"`, a context-too-long error returns OVERFLOW."""
         live = purpose == "turn"
+        request, blocked = await self.hooks.before("before_model_request", request)
+        if blocked is not None:
+            self.log.append("error", text=blocked.text, purpose=purpose)
+            await self.bus.emit(ev.ErrorEvent(f"Model request not sent. {blocked.text}"))
+            return None
         for attempt in range(MAX_TRIES):
             text: list[str] = []
             tool_uses: list[ToolUseBlock] = []
@@ -287,6 +297,7 @@ class AgentLoop:
                 if live:
                     self._last_prompt = (final.usage.prompt_tokens, len(request.messages))
                 await self._emit_usage()
+                await self.hooks.after("after_model_response", message)
                 return message
 
             error = error or pv.ProviderError("other", "model stream ended without a response")

@@ -1,5 +1,22 @@
 # Changelog
 
+## M8 — Context files, skills, extensions
+
+- Context files: `~/.loom/AGENTS.md`, then `AGENTS.md` / `CLAUDE.md` from the git root down to
+  the cwd (symlinked duplicates once), capped at `max_context_file_chars` with a notice.
+- Skills (`loom.skills`): `SKILL.md` frontmatter discovery in `~/.loom/skills`,
+  `.loom/skills` and (opt-in) `~/.claude/skills`; the user's own skills win name clashes; one
+  `- name — description (path)` line each in the system prompt; skill dirs readable without
+  approval; `/skills`, `/skill <name> [message]`.
+- Extensions (`loom.extensions`): `register(api)` modules from `~/.loom/extensions` and (trusted)
+  `.loom/extensions`; hooks for model requests/responses, built-in tool calls, broker calls,
+  session start and turn end, with `Block(reason)`; slash commands with `ctx.submit`; tool
+  packages, providers and built-in tools. Failures at load, in hooks or commands are notices.
+- Workspace trust (`~/.loom/trust.json`): a fingerprint of the project config and extensions
+  dir; interactive `loom` asks once when there is something to trust and asks again after any
+  change. Trust now unlocks restricted project-config keys.
+- `examples/skills/splunk-triage` and `examples/extensions/no_prod_writes.py`; `pyyaml` added.
+
 ## M7 — More providers, model profiles, capabilities
 
 - `openai_responses` adapter: stateless (`store=false`), `function_call` / `function_call_output`

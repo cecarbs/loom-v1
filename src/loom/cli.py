@@ -82,8 +82,11 @@ def main(argv: list[str] | None = None) -> int:
         return tools_command()
     if args.command == "sessions":
         return sessions_command()
+    workspace = Path.cwd().resolve()
     try:
-        loaded = load_config(Path.cwd().resolve(), cli=cli_overrides(args))
+        # Only the interactive run asks; subcommands use an existing grant.
+        trusted = workspace_trust(workspace, ask=args.command is None and sys.stdin.isatty())
+        loaded = load_config(workspace, cli=cli_overrides(args), trusted=trusted)
     except ConfigError as e:
         print(f"loom: {e}", file=sys.stderr)
         return 2
@@ -106,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 resume=args.resume,
                 resume_latest=args.continue_,
+                trusted=trusted,
             )
         )
     except (SandboxUnavailable, SessionError) as e:
@@ -115,6 +119,42 @@ def main(argv: list[str] | None = None) -> int:
         print(file=sys.stderr)
         return 130
     return 0
+
+
+def workspace_trust(workspace: Path, *, ask: bool) -> bool:
+    """Whether project extensions and restricted project settings apply (docs/08). With
+    `ask`, prompts once when the workspace has something to trust and no current grant."""
+    from loom.extensions.trust import grant, is_trusted, trust_request
+
+    home = loom_home()
+    if is_trusted(workspace, home):
+        return True
+    request = trust_request(workspace, home)
+    if not request or not ask:
+        return False
+    print("loom: this workspace has", file=sys.stderr)
+    for line in request.describe(workspace):
+        print(f"  · {line}", file=sys.stderr)
+    if request.extensions:
+        print("  Extensions run as you on this machine, outside the sandbox.", file=sys.stderr)
+    if request.config_keys:
+        print(
+            "  These settings can choose model endpoints, credentials and tool packages.",
+            file=sys.stderr,
+        )
+    print(
+        "  Only trust repositories you control. You are asked again if any of this changes.",
+        file=sys.stderr,
+    )
+    try:
+        answer = input(f"Trust {workspace}? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        return False
+    grant(workspace, home)
+    return True
 
 
 def secrets_command(action: str, name: str | None, keychain=None) -> int:
@@ -252,11 +292,19 @@ async def _interactive(
     model: str | None = None,
     resume: str | None = None,
     resume_latest: bool = False,
+    trusted: bool = False,
 ) -> None:
     from loom.app import App
     from loom.tui.app import InlineUI
 
-    app = App(Path.cwd().resolve(), config, model=model, resume=resume, resume_latest=resume_latest)
+    app = App(
+        Path.cwd().resolve(),
+        config,
+        model=model,
+        resume=resume,
+        resume_latest=resume_latest,
+        trusted=trusted,
+    )
     await app.start()
     try:
         await InlineUI(app).run()

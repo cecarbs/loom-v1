@@ -10,7 +10,7 @@ A cloned repo controls `<workspace>/.loom/config.toml`, so it is treated as untr
 |---|---|---|
 | Safe | `default_model` (must name an alias defined in user config or built-ins), `[agent]`, `[context]`, `[budget]`, `[kernel]`, `[skills]`, `[agents]` | applied |
 | Tighten-only | `[sandbox] backend` (`none` < `seatbelt` < `docker`), `[sandbox] network` (`allowlist` < `none`), `[sandbox] deny_read` (additions only), `[approvals] mode` (`yolo` < `auto-write` < `ask` < `read-only`), `[approvals.overrides]` (only `deny` values; an `ask` override could loosen a `read-only` deny) | applied only if at least as strict as the user value |
-| Restricted | `[models.*]`, `[providers.*]`, `[packages.*]`, `[sandbox] allowlist`, `env_passthrough`, `python_packages`, `[sandbox.docker]`, `[tracing]`, `[broker]` | ignored unless the workspace is trusted (`~/.loom/trust.json`, granted via the same prompt as project extensions, M8) |
+| Restricted | `[models.*]`, `[providers.*]`, `[packages.*]`, `[sandbox] allowlist`, `env_passthrough`, `python_packages`, `[sandbox.docker]`, `[tracing]`, `[broker]` | ignored unless the workspace is trusted (`~/.loom/trust.json`, granted via the same prompt as project extensions; see `08-…` "Extensions") |
 
 CLI flags always apply (they come from the user).
 

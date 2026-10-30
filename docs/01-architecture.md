@@ -172,9 +172,10 @@ loom/
     session/{store,checkpoints}.py
     tracing/{log,otel}.py
     skills/loader.py
-    extensions/{api,loader}.py
+    extensions/{api,loader,trust}.py   # API + hook runner, module loader, workspace trust
     agents/subagent.py
     tui/{app,input,render,approvals,commands}.py
+  examples/             # splunk-triage skill, no_prod_writes extension
   packages/
     loom-tools-splunk/
     loom-tools-demo/    # synthetic data, used by tests

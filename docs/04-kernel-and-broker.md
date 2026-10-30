@@ -160,7 +160,7 @@ For every `tool_call` from the kernel:
 
 1. **Resolve** `tool` in the catalog → unknown: error `ToolNotFound` with nearest names.
 2. **Validate** args against the function signature (pydantic `validate_call`).
-3. **Hooks**: extension `before_broker_call` hooks may modify or block (`before_tool_call` is for built-in tools; see `08-…`).
+3. **Hooks**: extension `before_broker_call` hooks may modify (then validated again) or block (`PermissionDenied` with the extension's reason; `before_tool_call` is for built-in tools; see `08-…`).
 4. **Approve** (see policy table). Emit `ApprovalRequested` and await the decision when needed.
 5. **Execute** with timeout (`[broker] call_timeout_s`, default 120). Exception: `agents.*` calls have no broker timeout (bounded by their own `max_turns`) and, like approvals, pause the `execute` timeout clock.
 6. **Redact**: scrub any configured secret values and known token patterns from the result (recursively through dicts/lists).

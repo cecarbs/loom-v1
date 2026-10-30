@@ -262,6 +262,22 @@ def load_config(
     return LoadedConfig(config, tuple(notices))
 
 
+def restricted_project_keys(workspace: Path, *, user_path: Path | None = None) -> list[str]:
+    """Project-config settings that are ignored now but would apply if the workspace were
+    trusted (what the trust prompt unlocks)."""
+    user_path = user_path or user_config_path()
+    project_path = project_config_path(workspace)
+    if _same_file(project_path, user_path):
+        return []
+    project_raw = _read_toml(project_path)
+    if not project_raw:
+        return []
+    user = _validate(_read_toml(user_path), user_path)
+    _, untrusted = _filter_project(project_raw, user, trusted=False)
+    _, trusted = _filter_project(project_raw, user, trusted=True)
+    return [item.split(" (")[0] for item in untrusted if item not in trusted]
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as f:

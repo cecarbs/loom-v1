@@ -43,7 +43,7 @@ class InlineUI:
         self.console = console or Console(highlight=False)
         interactive = sys.stdin.isatty() and self.console.is_terminal
         self.interactive = interactive
-        self.commands = commands or builtin_commands()
+        self.commands = commands or builtin_commands(app.extensions.commands, app.notices)
         if approver is None:
             approver = ApprovalPrompt(self.console) if interactive else DenyAll(self.console)
         self.renderer = Renderer(self.console, approver, app.bus)
@@ -114,15 +114,17 @@ class InlineUI:
                     self.commands,
                     ask=self.ask if self.interactive else None,
                     run=self.run_turn,
+                    send=self.send,
                 )
                 await self.commands.run(ctx, line)
                 if ctx.exit_requested:
                     return
                 continue
-            self.console.print(
-                Panel(Text(line), title="you", title_align="left", border_style="dim")
-            )
-            await self.run_turn(self.app.submit(line))
+            await self.send(line)
+
+    async def send(self, line: str) -> None:
+        self.console.print(Panel(Text(line), title="you", title_align="left", border_style="dim"))
+        await self.run_turn(self.app.submit(line))
 
     async def ask(self, prompt: str) -> str | None:
         """A one-line answer for a command (e.g. /undo's choice); None if cancelled."""

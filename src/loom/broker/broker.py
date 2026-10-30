@@ -1,6 +1,6 @@
 """ToolBroker: the one choke point for kernel tool calls (docs/04 "Broker call pipeline").
 
-resolve → validate → (hooks, M8) → approve → execute with timeout → serialize + redact →
+resolve → validate → extension hooks → approve → execute with timeout → serialize + redact →
 log → reply. Package code runs here, on the host, never in the sandbox.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import dataclasses
 import datetime
 import decimal
@@ -27,6 +28,7 @@ from loom.broker.approval import Access, Approvals
 from loom.broker.registry import Effect, PackageError, ToolPackage, ToolSpec
 from loom.broker.secrets import SecretStore
 from loom.core.events import Decision
+from loom.extensions.api import Blocked, BrokerCall, Hooks
 from loom.session.store import SessionLog
 
 log = logging.getLogger(__name__)
@@ -113,7 +115,9 @@ class ToolBroker:
         package_config: Mapping[str, Mapping[str, Any]] | None = None,
         call_timeout_s: float = 120,
         log_results: bool = False,
+        hooks: Hooks | None = None,
     ) -> None:
+        self.hooks = hooks or Hooks()
         self.packages = {p.name: p for p in packages}
         self.specs = {s.qualname: s for p in packages for s in p.tools.values()}
         self.approvals = approvals
@@ -138,27 +142,49 @@ class ToolBroker:
         start = time.monotonic()
         spec = self.specs.get(tool)
         decision: Decision | None = None
+        blocked: Blocked | None = None
+        hooked: BrokerCall | None = None
         try:
             if spec is None:
                 reply = ToolReply.error("ToolNotFound", self._not_found(tool))
             elif (problem := self._validate(spec, args := from_jsonable(args))) is not None:
                 reply = problem
             else:
-                kwargs = self._kwargs(spec, args)
-                # Extension `before_broker_call` hooks run here (M8).
-                with clock.paused() if clock is not None else contextlib.nullcontext():
-                    decision = await self.approvals.check(
-                        tool, _access(spec, kwargs), call_id=call_id
-                    )
-                if not decision.allowed:
-                    reply = ToolReply.error("PermissionDenied", self._denial(spec, decision))
+                call = BrokerCall(tool, copy.deepcopy(args), spec.effect, call_id)
+                hooked, blocked = await self.hooks.before("before_broker_call", call)
+                if hooked.args != args:  # a hook changed them
+                    args = hooked.args
+                    problem = self._validate(spec, args)
+                if blocked is not None:
+                    reply = ToolReply.error("PermissionDenied", blocked.text)
+                elif problem is not None:
+                    reply = problem
                 else:
-                    reply = await self._run(spec, kwargs)
+                    reply, decision = await self._approve_and_run(spec, args, call_id, clock)
         except asyncio.CancelledError:
-            self._log(tool, args, spec, decision, start, ToolReply.error("Cancelled", ""), call_id)
+            reply = ToolReply.error("Cancelled", "")
+            self._log(tool, args, spec, decision, start, reply, call_id, blocked)
             raise
-        self._log(tool, args, spec, decision, start, reply, call_id)
+        self._log(tool, args, spec, decision, start, reply, call_id, blocked)
+        if hooked is not None:
+            hooked.ok, hooked.value = reply.ok, reply.value
+            hooked.error = None if reply.ok else f"{reply.error_type}: {reply.message}"
+            await self.hooks.after("after_broker_call", hooked)
         return reply
+
+    async def _approve_and_run(
+        self, spec: ToolSpec, args: dict[str, Any], call_id: str, clock: Clock | None
+    ) -> tuple[ToolReply, Decision]:
+        kwargs = self._kwargs(spec, args)
+        with clock.paused() if clock is not None else contextlib.nullcontext():
+            decision = await self.approvals.check(
+                spec.qualname, _access(spec, kwargs), call_id=call_id
+            )
+        if not decision.allowed:
+            reply = ToolReply.error("PermissionDenied", self._denial(spec, decision))
+        else:
+            reply = await self._run(spec, kwargs)
+        return reply, decision
 
     def _validate(self, spec: ToolSpec, args: Any) -> ToolReply | None:
         if not isinstance(args, dict):
@@ -227,6 +253,7 @@ class ToolBroker:
         start: float,
         reply: ToolReply,
         call_id: str,
+        blocked: Blocked | None = None,
     ) -> None:
         record: dict[str, Any] = {
             "tool": tool,
@@ -237,6 +264,8 @@ class ToolBroker:
             "duration_ms": int((time.monotonic() - start) * 1000),
             "ok": reply.ok,
         }
+        if blocked is not None:
+            record["blocked"] = {"by": blocked.extension, "reason": blocked.reason}
         if reply.ok:
             record["result_chars"] = len(json.dumps(reply.value, default=str))
             if self.log_results:

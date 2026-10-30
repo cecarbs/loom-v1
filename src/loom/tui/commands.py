@@ -1,4 +1,4 @@
-"""Slash command framework (docs/06 "Slash commands"). Extensions register more in M8."""
+"""Slash command framework (docs/06 "Slash commands"); extensions register more (docs/08)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from rich.text import Text
 
 from loom.app import App
 from loom.config import ApprovalMode
+from loom.extensions.api import ExtensionCommand
 from loom.providers.profiles import profile_notices
 from loom.session.checkpoints import UndoEntry
 from loom.session.store import SessionError, SessionSummary
@@ -20,6 +21,7 @@ from loom.tui.render import Renderer, format_cost
 
 Ask = Callable[[str], Awaitable[str | None]]  # prompt → answer (None: cancelled)
 Runner = Callable[[Coroutine[Any, Any, Any]], Awaitable[None]]
+Sender = Callable[[str], Awaitable[None]]  # shows a user message and runs its turn
 
 
 @dataclass
@@ -31,6 +33,17 @@ class CommandContext:
     exit_requested: bool = False
     ask: Ask | None = None  # None when there's no terminal to ask on
     run: Runner | None = None  # runs cancellable work (Ctrl+C) the way a turn runs
+    send: Sender | None = None
+
+    async def submit(self, text: str) -> None:
+        """Send `text` as a user message and run the turn (extension commands use this)."""
+        if self.send is not None:
+            await self.send(text)
+        else:
+            await self.app.submit(text)
+
+    def print(self, text: str) -> None:
+        self.console.print(Text(text), soft_wrap=True)
 
 
 Handler = Callable[[CommandContext, str], Awaitable[None] | None]
@@ -84,7 +97,7 @@ class CommandRegistry:
 def _help(ctx: CommandContext, args: str) -> None:
     table = Table.grid(padding=(0, 2))
     for command in ctx.commands.commands():
-        table.add_row(Text(f"/{command.name} {command.usage}".rstrip(), "bold"), command.help)
+        table.add_row(Text(f"/{command.name} {command.usage}".rstrip(), "bold"), Text(command.help))
     ctx.console.print(table)
     ctx.console.print(
         Text(
@@ -313,14 +326,83 @@ def _thinking(ctx: CommandContext, args: str) -> None:
     ctx.console.print(Text(f"Thinking output {state}.", style="dim"))
 
 
+def _skills(ctx: CommandContext, args: str) -> None:
+    skills = ctx.app.skills
+    if not skills:
+        ctx.console.print(
+            Text(
+                "No skills found. Add <name>/SKILL.md under ~/.loom/skills or .loom/skills.",
+                style="dim",
+            )
+        )
+        return
+    table = Table(box=None, padding=(0, 2), show_edge=False)
+    table.add_column("skill", style="bold")
+    table.add_column("source", style="cyan")
+    table.add_column("description")
+    for skill in skills:
+        table.add_row(skill.name, skill.source, skill.description)
+    ctx.console.print(table)
+    ctx.console.print(Text("Load one into your next message with /skill <name>.", style="dim"))
+
+
+async def _skill(ctx: CommandContext, args: str) -> None:
+    name, _, message = args.partition(" ")
+    if not name:
+        _skills(ctx, "")
+        return
+    skill = ctx.app.find_skill(name)
+    if skill is None:
+        known = ", ".join(s.name for s in ctx.app.skills) or "none"
+        ctx.console.print(Text(f"Unknown skill '{name}'. Skills: {known}", style="red"))
+        return
+    ctx.app.load_skill(skill)
+    if message.strip():
+        await ctx.submit(message.strip())
+    else:
+        ctx.console.print(Text(f"{skill.name} will be sent with your next message.", style="dim"))
+
+
+def extension_command(ext: ExtensionCommand) -> Command:
+    """Wrap an extension's `handler(args, ctx)`; its errors are shown, never raised."""
+
+    async def run(ctx: CommandContext, args: str) -> None:
+        try:
+            result = ext.handler(args, ctx)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            ctx.app.agent.log.append("error", text=f"extension {ext.extension} /{ext.name}: {e}")
+            ctx.console.print(
+                Text(
+                    f"Extension {ext.extension}: /{ext.name} failed: {type(e).__name__}: {e}",
+                    style="yellow",
+                )
+            )
+
+    return Command(ext.name, f"{ext.help} ({ext.extension} extension)".lstrip(), run, "[args]")
+
+
 def _exit(ctx: CommandContext, args: str) -> None:
     ctx.exit_requested = True
 
 
-def builtin_commands() -> CommandRegistry:
+def builtin_commands(
+    extensions: list[ExtensionCommand] | None = None, notices: list[str] | None = None
+) -> CommandRegistry:
+    """Built-ins, then extension commands; a clash keeps the existing command and adds a
+    notice."""
     registry = CommandRegistry()
     for command in BUILTINS:
         registry.register(command)
+    for ext in extensions or ():
+        if registry.get(ext.name) is not None:
+            if notices is not None:
+                notices.append(
+                    f"Extension {ext.extension}: /{ext.name} is already a command; skipped."
+                )
+            continue
+        registry.register(extension_command(ext))
     return registry
 
 
@@ -335,6 +417,8 @@ BUILTINS = (
     Command("undo", "restore files to a checkpoint", _undo, "[n]"),
     Command("kernel", "show kernel variables, or restart it", _kernel, "[reset]"),
     Command("tools", "browse kernel tool functions", _tools, "[query]"),
+    Command("skills", "list available skills", _skills),
+    Command("skill", "load a skill into the next message", _skill, "<name> [message]"),
     Command("mode", "show or set the approval mode", _mode, "[read-only|ask|auto-write|yolo]"),
     Command("thinking", "show or collapse thinking output", _thinking, "on|off"),
     Command("exit", "quit", _exit, aliases=("quit",)),

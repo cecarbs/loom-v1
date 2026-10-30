@@ -20,9 +20,18 @@ from loom.broker.secrets import KeyringKeychain, SecretStore
 from loom.config import ApprovalMode, LoomConfig
 from loom.core import events as ev
 from loom.core.agent import AgentLoop
-from loom.core.context import ContextBuilder
+from loom.core.context import (
+    ContextBuilder,
+    PromptExtras,
+    context_file_paths,
+    load_context_files,
+)
 from loom.core.events import EventBus
 from loom.core.mentions import expand_mentions
+from loom.core.messages import Block, TextBlock
+from loom.extensions.api import Extensions, Hooks, SessionStart
+from loom.extensions.loader import extension_files, load_extensions
+from loom.extensions.trust import project_extensions_dir
 from loom.kernel.client import ExecClock, KernelClient
 from loom.kernel.protocol import VarInfo
 from loom.providers.base import Provider
@@ -44,6 +53,7 @@ from loom.session.store import (
     rebuild,
     release_lock,
 )
+from loom.skills.loader import Skill, discover_skills, skill_roots
 from loom.tools.base import ToolContext, ToolSet
 from loom.tools.budget import OutputBudget
 from loom.tools.builtin.bash import BashTool
@@ -70,10 +80,15 @@ def build_agent(
     backend: SandboxBackend | None = None,
     packages: Sequence[ToolPackage] | None = None,
     resume: SessionPaths | None = None,
+    extras: PromptExtras | None = None,
+    skills: Sequence[Skill] = (),
+    extensions: Extensions | None = None,
 ) -> AgentLoop:
     """Raises SandboxUnavailable if the configured backend can't be used, SessionError if
     `resume` is in use by another loom. `packages` defaults to the installed tool packages.
-    A resumed session continues on the model it last used unless `model` is given."""
+    A resumed session continues on the model it last used unless `model` is given.
+    `extras` (context files, skill lines) are appended to the system prompt; `skills` dirs
+    are readable by the file tools; `extensions` add hooks, packages and tools."""
     state = rebuild(SessionLog(resume.log).read()) if resume is not None else None
     if model is None and state is not None and state.model in config.model_aliases():
         model = state.model
@@ -83,6 +98,8 @@ def build_agent(
     backend = backend or create_backend(config.sandbox, loom_home=home)
     if packages is None:
         packages, _ = discover_packages()
+    extensions = extensions or Extensions()
+    packages = [*packages, *extensions.packages]
 
     paths = resume or new_session(workspace, home)
     acquire_lock(paths)
@@ -97,7 +114,10 @@ def build_agent(
         sandbox=backend.name,
         mode=config.approvals.mode,
         loom_version=__version__,
+        extensions=extensions.names,
+        skills=[s.name for s in skills],
     )
+    hooks = Hooks(extensions.hooks, bus=bus, session_log=session_log)
 
     env = sandbox_env(session, config.sandbox.env_passthrough)
     workspace_writable = config.approvals.mode != "read-only"
@@ -112,6 +132,7 @@ def build_agent(
         package_config=config.packages,
         call_timeout_s=config.broker.call_timeout_s,
         log_results=config.tracing.log_tool_results,
+        hooks=hooks,
     )
 
     async def handle_tool_call(
@@ -139,12 +160,14 @@ def build_agent(
             BashTool(),
             ExecuteTool(config.kernel.default_timeout_s),
             SearchToolsTool(broker),
+            *extensions.tools,
         ],
         OutputBudget(config.budget, paths.out_dir),
         session_log,
         bus,
         approvals,
         secrets.redactor,
+        hooks,
     )
     checkpoints = Checkpoints(
         workspace,
@@ -156,7 +179,7 @@ def build_agent(
     )
     tool_ctx = ToolContext(
         workspace=workspace,
-        paths=PathPolicy(workspace, read_roots=[paths.out_dir]),
+        paths=PathPolicy(workspace, read_roots=[paths.out_dir, *(s.directory for s in skills)]),
         read_set=ReadSet(),
         bus=bus,
         model_accepts_images=profile.capabilities.images,
@@ -172,11 +195,12 @@ def build_agent(
         profile=profile,
         tools=tools,
         tool_ctx=tool_ctx,
-        context=ContextBuilder(profile, workspace, tools.names()),
+        context=ContextBuilder(profile, workspace, tools.names(), extras=extras),
         bus=bus,
         session_log=session_log,
         max_steps=config.agent.max_steps,
         context_config=config.context,
+        hooks=hooks,
     )
     if state is not None:
         agent.restore(state)
@@ -200,31 +224,80 @@ class App:
         resume: str | None = None,
         model: str | None = None,
         resume_latest: bool = False,
+        extensions: Extensions | None = None,
+        trusted: bool = False,
     ) -> None:
         """`resume` (a session id or unique prefix) or `resume_latest` continue a session of
         this workspace; raises SessionError if there's none. `model` overrides the model
-        (default: the resumed session's, else `default_model`)."""
+        (default: the resumed session's, else `default_model`). `extensions` default to the
+        ones in `<home>/extensions` plus, if the workspace is `trusted`, the project's."""
         self.workspace = workspace
         self.config = config
         self.bus = bus or EventBus()
         self.home = home
         self.secrets = secrets or SecretStore(keychain=KeyringKeychain())
-        self._make_provider = provider_factory or (lambda p: create_provider(p, self.secrets))
+        self.notices: list[str] = []
+        if extensions is None:
+            extensions, notices = self._load_extensions(trusted)
+            self.notices.extend(notices)
+        self.extensions = extensions
+        self._make_provider = provider_factory or (
+            lambda p: create_provider(p, self.secrets, extra=self.extensions.providers)
+        )
         if packages is None:
-            packages, self.notices = discover_packages()
-        else:
-            self.notices = []
+            packages, notices = discover_packages()
+            self.notices.extend(notices)
         self.packages = list(packages)
+        self.skills: list[Skill] = []
+        self._pending_skills: list[Skill] = []
         self.backend = create_backend(config.sandbox, loom_home=home)
         paths = None
         if resume is not None or resume_latest:
             paths = find_session(workspace, resume, home)
         self.resumed = paths is not None
         self.agent = self._build(model, paths)
+        self.notices.extend(self._prompt_notices)
         self.notices.extend(profile_notices(self.agent.profile))
+
+    @property
+    def loom_home(self) -> Path:
+        return self.home or loom_home()
+
+    def _load_extensions(self, trusted: bool) -> tuple[Extensions, list[str]]:
+        user_dir = self.loom_home / "extensions"
+        project_dir = project_extensions_dir(self.workspace)
+        files = extension_files(user_dir)
+        notices: list[str] = []
+        if project_dir.resolve() != user_dir.resolve():
+            project_files = extension_files(project_dir)
+            if trusted:
+                files.extend(project_files)
+            elif project_files:
+                notices.append(
+                    f"Project extensions in {project_dir} were not loaded: the workspace is "
+                    "not trusted."
+                )
+        extensions, load_notices = load_extensions(files)
+        return extensions, notices + load_notices
+
+    def _prompt_extras(self) -> PromptExtras:
+        """Context files and skills, read at each session start (docs/08)."""
+        context, notices = load_context_files(
+            context_file_paths(self.workspace, self.loom_home),
+            self.config.context.max_context_file_chars,
+        )
+        self.skills, skill_notices = discover_skills(
+            skill_roots(
+                self.workspace, self.loom_home, include_claude=self.config.skills.include_claude
+            )
+        )
+        lines = [s.prompt_line() for s in self.skills]
+        return PromptExtras(context, lines, notices + skill_notices)
 
     def _build(self, alias: str | None, resume: SessionPaths | None = None) -> AgentLoop:
         """`alias` None: the resumed session's model, else the default."""
+        extras = self._prompt_extras()
+        self._prompt_notices = extras.notices
         return build_agent(
             self.workspace,
             self.config,
@@ -236,6 +309,9 @@ class App:
             secrets=self.secrets,
             packages=self.packages,
             resume=resume,
+            extras=extras,
+            skills=self.skills,
+            extensions=self.extensions,
         )
 
     @property
@@ -268,6 +344,10 @@ class App:
         await self.backend.start(self._session_info())
         if self.config.kernel.eager:
             await self.kernel.start()
+        await self.agent.hooks.after(
+            "session_start",
+            SessionStart(self.session_id, self.workspace, self.profile.alias, self.resumed),
+        )
 
     async def aclose(self) -> None:
         await self.kernel.shutdown()
@@ -378,10 +458,44 @@ class App:
     def _session_info(self) -> SessionInfo:
         return self.kernel.session
 
+    def find_skill(self, name: str) -> Skill | None:
+        return next((s for s in self.skills if s.name == name), None)
+
+    def load_skill(self, skill: Skill) -> None:
+        """Attach `skill`'s SKILL.md to the next user message (`/skill`)."""
+        if skill not in self._pending_skills:
+            self._pending_skills.append(skill)
+
+    @property
+    def pending_skills(self) -> list[Skill]:
+        return list(self._pending_skills)
+
     async def submit(self, text: str) -> None:
         mentions = await expand_mentions(text, self.agent.tool_ctx, self.agent.tools.budget)
         for notice in mentions.notices:
             await self.bus.emit(ev.Notice(notice))
         if mentions.attached:
             await self.bus.emit(ev.Notice("Attached " + ", ".join(mentions.attached)))
-        await self.agent.run_turn(text, mentions.blocks)
+        blocks: list[Block] = [*await self._skill_blocks(), *mentions.blocks]
+        await self.agent.run_turn(text, blocks)
+
+    async def _skill_blocks(self) -> list[Block]:
+        blocks: list[Block] = []
+        skills, self._pending_skills = self._pending_skills, []
+        for skill in skills:
+            try:
+                body = skill.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                await self.bus.emit(ev.Notice(f"Could not load skill {skill.name}: {e}"))
+                continue
+            text, _ = self.agent.tools.budget.apply(body)
+            blocks.append(
+                TextBlock(
+                    f'<skill name="{skill.name}" path="{skill.path}">\n{text}\n</skill>\n'
+                    f"The user loaded the {skill.name} skill for this message; follow it. Its "
+                    f"other files are in {skill.directory}."
+                )
+            )
+        if skills:
+            await self.bus.emit(ev.Notice("Loaded skill " + ", ".join(s.name for s in skills)))
+        return blocks
