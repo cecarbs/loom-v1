@@ -8,6 +8,7 @@ flowchart LR
     M3 --> M4[M4 Broker + tools] --> M5[M5 Sandboxes] --> M6[M6 Sessions + compaction]
     M6 --> M7[M7 OpenAI-compat] --> M8[M8 Skills + extensions] --> M9[M9 Tracing]
     M9 --> M10[M10 Sub-agents] --> M11[M11 MCP adapter]
+    M11 --> M12[M12 Extension API] --> M13[M13 Extension packages]
 ```
 
 ## M0 — Skeleton
@@ -119,3 +120,34 @@ Docs: 08, 09.
 - `loom -p` one-shot mode polish; first-run tutorial using the demo package.
 
 Acceptance: a stdio MCP server's tools appear in `search_tools` and are callable from the kernel; `loom -p` returns a final answer with exit code 0 and denies approvals by default.
+
+## M12 — Extension API depth
+Docs: 08, 06, 07.
+
+Brings extensions closer to Pi's within loom's invariants. Pi extensions themselves are not a goal: they are in-process TypeScript and can't run in loom.
+
+Fixes first:
+- `_`-prefixed helper files (documented, but `import _helper` fails today) become importable from a sibling extension, or directory extensions replace them.
+- A tool from `add_builtin_tool` that doesn't define `access` asks for approval instead of skipping the check (`tools/base.py`). Tools that mutate the workspace can take a checkpoint.
+- `before_model_request` tells extensions the request's purpose (`turn` or `compaction`).
+
+New API:
+- `ctx.ui`: `confirm`, `select`, `input`, `notify`, `set_status`. A protocol the TUI implements (hard rule 1); prompts use the approval prompt's path, so they respect terminal ownership; `loom -p` gets a non-interactive implementation that returns the default.
+- Hooks: `input` (transform or handle a user message), `before_compact` (cancel, or supply the summary), `compact`.
+- `api.append_entry`: extension state in the session log, restored on resume and kept out of the model's context.
+- `api.shortcut` and command argument completion.
+- Stable `ctx` accessors for what extensions use `ctx.app` for today; `ctx.app` is deprecated.
+
+Not in scope: full custom UI components (they wait for the Textual UI) and Pi's finer-grained session and streaming events, until a real extension needs them.
+
+Acceptance: an extension using a helper file loads; a tool without `access` triggers `ApprovalRequested` and a denial returns an error result; an extension tells compaction requests from turn requests; `ctx.ui.confirm` works in the TUI and returns the default under `loom -p`; `before_compact` can cancel a compaction and can replace the summary, and tool pairs stay valid; an `input` hook can rewrite a message and can handle it without a model request; `append_entry` state survives a resume and appears in no model request; no core module imports `loom.tui`.
+
+## M13 — Extension packages and reload
+Docs: 08, 09.
+- Manifest for a package that bundles extensions, skills and tool packages.
+- `loom install`, `loom list`, `loom remove`, wrapping `uv`; versions are pinned.
+- Project-declared packages are a restricted config key (hard rule 9): ignored until the workspace is trusted, and never installed before that.
+- The trust fingerprint covers the contents of project-declared packages, not just `.loom/config.toml` and `.loom/extensions/`.
+- `/reload` for file-based extensions: a new teardown hook runs first (`shutdown` only fires at exit), and trust is checked again, because the sandbox can write the workspace. Installed extensions still need a restart: Python can't cleanly unload them, and `loom-mcp` holds a daemon thread and live connections.
+
+Acceptance: a package installed from a local path contributes an extension, a skill and a tool package; a project-declared package is ignored in an untrusted workspace, with a notice; changing a project-declared package's contents voids the trust grant; `/reload` picks up an edited file extension, and its old hooks and commands are gone; if `.loom/extensions/` changed since the grant, `/reload` doesn't load the new code until the user grants trust again.
