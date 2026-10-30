@@ -30,7 +30,7 @@ You are building **loom**, a minimal, terminal-based coding/ops agent harness in
 1. **`loom.core` never imports `loom.tui`.** The core emits `AgentEvent`s on an event bus; the TUI subscribes. A future Textual UI must be able to reuse the core unchanged.
 2. **`loom/kernel/runner.py` is stdlib-only** and must run on any Python ≥ 3.11 inside the sandbox. It never imports `loom`.
 3. **Tool package code runs on the host (broker), never in the sandbox.** The sandbox gets generated stubs only.
-4. **Secrets never enter the sandbox or the model context.** Secrets are resolved only on the host by `SecretStore`; its only consumers are the broker (tool packages) and provider adapters (API keys, `secret:` headers).
+4. **Secrets never enter the sandbox or the model context.** Secrets are resolved only on the host by `SecretStore`; its only consumers are the broker (tool packages), provider adapters (API keys, `secret:` headers) and host-side extensions via `api.secret` (loom-mcp's server credentials).
 5. **Every tool result passes through the output budget** (`loom/tools/budget.py`) before reaching the model.
 6. **Every model request, tool call, kernel execution, and approval decision is written to the session log.**
 7. Tool-use / tool-result pairing in message history must always be valid, including after cancellation (insert synthetic error results).
@@ -41,7 +41,7 @@ You are building **loom**, a minimal, terminal-based coding/ops agent harness in
 
 - Python **3.12+**, `uv` for env and packaging, `src/` layout, entry point `loom = "loom.cli:main"`.
 - Async: `asyncio` throughout the core. Blocking work (subprocess I/O, SDK calls without async) goes through `asyncio.to_thread` or async APIs.
-- Libraries: `anthropic`, `openai`, `prompt_toolkit`, `rich`, `pydantic` (v2, for config and tool schemas), `keyring`, `opentelemetry-*` (optional extra), `pyyaml`. Docker is driven through the `docker` CLI (no Python SDK).
+- Libraries: `anthropic`, `openai`, `prompt_toolkit`, `rich`, `pydantic` (v2, for config and tool schemas), `keyring`, `opentelemetry-*` (optional extra), `pyyaml`; `mcp` and `httpx2` in `packages/loom-mcp` only. Docker is driven through the `docker` CLI (no Python SDK).
 - Not used in v1: Textual (reserved for a later full-screen UI on the same event bus).
 - Typing: full type hints; `pyright` in basic mode. Lint/format: `ruff`.
 - Tests: `pytest`, `pytest-asyncio`. No real network or real model calls in unit tests — use `FakeProvider` (scripted responses). Tests needing macOS `sandbox-exec` or Docker are marked `@pytest.mark.macos` / `@pytest.mark.docker` and skipped when unavailable.

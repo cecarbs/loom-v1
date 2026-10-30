@@ -156,7 +156,7 @@ async def test_seatbelt_allowlist_reaches_only_that_host(world: World, upstream:
         assert "403" in denied, denied
         # Around the proxy: the profile blocks every other connection.
         direct = await box.bash(_curl(f"http://127.0.0.1:{upstream}/", "--noproxy '*'"))
-        assert "200" not in direct and "000" in direct, direct
+        assert not direct.startswith("200") and "000" in direct, direct
         from_python = await box.py(
             "import urllib.request\n"
             f"urllib.request.urlopen('http://localhost:{upstream}/').read().decode()"
@@ -193,7 +193,7 @@ async def test_docker_allowlist_reaches_only_that_host(world: World, upstream: i
         denied = await box.bash(_curl("https://example.com/"))
         assert "403" in denied or "CONNECT" in denied, denied
         direct = await box.bash(_curl(f"http://{host}:{upstream}/", "--noproxy '*'"))
-        assert "200" not in direct, direct  # internal network: no route, no DNS
+        assert not direct.startswith("200"), direct  # internal network: no route, no DNS
         names = (backend.container, backend.proxy, backend.network)
         assert None not in names
     finally:

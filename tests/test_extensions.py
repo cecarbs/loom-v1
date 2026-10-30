@@ -31,6 +31,12 @@ from loom.tui.approvals import DenyAll
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_extensions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only what each test loads (loom-mcp is installed in the dev environment)."""
+    monkeypatch.setattr("loom.extensions.loader.entry_points", lambda group: [])
+
+
 def write_ext(directory: Path, name: str, source: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.py"

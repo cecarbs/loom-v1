@@ -1,6 +1,7 @@
 """Host-side secrets (docs/04 "Secrets"): the macOS Keychain via `keyring` (service `loom`),
-falling back to `LOOM_SECRET_<NAME>`. Consumers: the broker (tool packages) and provider
-adapters. Every resolved value is registered with the redactor."""
+falling back to `LOOM_SECRET_<NAME>`. Consumers: the broker (tool packages), provider
+adapters and host-side extensions (`api.secret`, for loom-mcp's server credentials). Every
+resolved value is registered with the redactor."""
 
 from __future__ import annotations
 

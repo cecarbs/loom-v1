@@ -117,6 +117,18 @@ port = 8089
 verify_tls = true
 allowed_indexes = ["web", "app"]
 
+[packages.mcp.servers.github]      # stdio MCP server (needs loom-mcp; docs/08 "MCP adapter")
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "secret:github_token" }   # plain values work too
+# cwd = "~/src"                    # default: the workspace
+# description = "GitHub issues and PRs"          # shown by search_tools("")
+# startup_timeout_s = 30
+
+[packages.mcp.servers.docs]        # streamable HTTP
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "secret:docs_mcp_auth" }
+
 [skills]
 include_claude = false
 
@@ -147,13 +159,16 @@ log_tool_results = false           # also log (and export) broker call results
 | `headers` | table | {} | Values may be `"secret:<name>"` |
 | `extra_body` | table | {} | Merged into the request body; may not set `model`, `messages`, `tools`, `stream`, `system`, `input`, `instructions` |
 
-Unknown keys are a config error (pydantic `extra="forbid"`) so typos are caught early.
+Unknown keys are a config error (pydantic `extra="forbid"`) so typos are caught early. `[packages.*]` tables belong to their package; `loom-mcp` checks `[packages.mcp]` itself and skips a bad server with a notice.
 
 ## CLI
 
 ```
 loom                         start in cwd
 loom -p "prompt"             one-shot, print final answer, exit (non-interactive; approvals → deny unless --mode allows)
+                             stdout has only the answer; notices, denials and errors go to stderr
+                             exit 0: final answer; 1: none (model error, empty response, step limit); 2: bad usage or config; 130: interrupted
+                             never asks for trust; combines with -c/--resume, --model, --mode, --sandbox
 loom -c | --resume <id>      resume latest / specific session (id or unique prefix; the session's last model unless --model)
 loom --model <alias>
 loom --mode <mode>
@@ -162,7 +177,7 @@ loom sandbox setup [--docker]
 loom secrets set|list|delete <name>
 loom models list             configured models (built-in: sonnet, opus, haiku) with resolved capabilities
 loom models test <alias>     probe a model: reply, tool call, image; suggests capability settings
-loom tools list              show catalog (installed `loom.tools` entry points)
+loom tools list              show catalog (installed `loom.tools` entry points; extension packages such as mcp_* appear in `/tools`)
 loom trace [<id>] [--last N] [--code]   trace tree of a session (default: latest)
 loom sessions                list sessions for cwd
 ```

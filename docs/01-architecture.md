@@ -129,6 +129,7 @@ loom/
     cli.py
     config.py
     app.py              # wires config, provider, tools, session into an AgentLoop (shared by UIs)
+    oneshot.py          # `loom -p`: a UI without a terminal
     core/
       agent.py          # AgentLoop
       messages.py       # canonical message + block types
@@ -179,6 +180,7 @@ loom/
   examples/             # splunk-triage skill, no_prod_writes extension
   packages/
     loom-tools-splunk/
-    loom-tools-demo/    # synthetic data, used by tests
+    loom-tools-demo/    # synthetic data, used by tests and /tutorial
+    loom-mcp/           # extension: MCP servers as tool packages
   tests/
 ```

@@ -92,6 +92,8 @@ class InlineUI:
             self.console.print(Text(f"· {notice}", style="yellow"))
         if self.app.resumed:
             print_resumed(self.console, self.app)
+        elif self.app.first_run:
+            self.console.print(Text("First time here? /tutorial is a short tour.", style="dim"))
         ctrl_c_pending = False
         while True:
             line = await self.source.read()

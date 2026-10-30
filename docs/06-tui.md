@@ -4,6 +4,8 @@ The UI runs **inline**: output goes to normal terminal scrollback (copy/paste an
 
 The TUI only talks to the core through the event bus (`AgentEvent`s) and a small command API, `loom.app.App`: `submit(text)` (runs a turn; the UI cancels it by cancelling that task), `switch_model(alias)`, `new_session()`, plus `bus.respond(...)` for approvals and read-only state (`profile`, `agent.usage`, `agent.cost_usd`). `loom.app` is shared by every UI and, like the core, never imports `loom.tui`. Slash-command handlers get a `CommandContext` (app, console, renderer, registry).
 
+`loom -p` has no renderer at all: `loom.oneshot.OneShot` subscribes to the bus, prints the final answer to stdout and everything else to stderr (`09-config.md` "CLI").
+
 When stdin is not a terminal (piped input, scripts), the same renderer runs on a plain console without Live regions, input is read line by line, and approval requests resolve as deny.
 
 ## Screen anatomy
@@ -86,6 +88,7 @@ Single-key answer via a short prompt_toolkit key-binding app. Calls `bus.respond
 | Command | Action |
 |---|---|
 | `/help` | list commands |
+| `/tutorial` | a short tour on the demo package (steps to type); says how to get `loom-tools-demo` if it isn't installed. Interactive `loom` mentions it on the very first run (no `~/.loom/sessions` yet) |
 | `/model [alias]` | show or switch model |
 | `/mode [read-only\|ask\|auto-write\|yolo]` | approval mode (kept for later sessions; not saved to config) |
 | `/kernel`, `/kernel reset` | inventory; restart kernel |

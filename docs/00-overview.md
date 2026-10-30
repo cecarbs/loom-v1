@@ -16,14 +16,14 @@ A minimal terminal agent harness (in the spirit of Pi and Claude Code) that runs
 4. Multi-provider: Anthropic and any OpenAI-compatible API (OpenAI, OpenRouter, Ollama, vLLM, LM Studio).
 5. Inline TUI that stays in normal terminal scrollback.
 6. Full traceability: every program the agent ran is logged and inspectable.
-7. Extensible: tool packages, skills, extensions, and (later) an MCP adapter.
+7. Extensible: tool packages, skills, extensions, and an MCP adapter.
 
 ## Non-goals (v1)
 
 - Windows/Linux support (design keeps it possible; only macOS is implemented and tested).
 - Full-screen UI (Textual) — later, on the same event bus.
 - IDE integrations, web UI, multi-user/remote operation.
-- Native MCP in the core (an adapter extension comes later).
+- Native MCP in the core (`loom-mcp` is an adapter extension).
 - Persisting kernel memory across process restarts (possible later via snapshots).
 - Steering (typing a message while a turn runs). Conflicts with the inline TUI's terminal-ownership rule; revisit with the Textual UI.
 

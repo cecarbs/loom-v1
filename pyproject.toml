@@ -25,6 +25,7 @@ otel = [
 
 [dependency-groups]
 dev = [
+    "loom-mcp",
     "loom-tools-demo",
     "loom-tools-splunk",
     "pyright>=1.1.390",
@@ -38,6 +39,7 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 loom = { workspace = true }
+loom-mcp = { workspace = true }
 loom-tools-demo = { workspace = true }
 loom-tools-splunk = { workspace = true }
 

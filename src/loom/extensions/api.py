@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
@@ -16,6 +16,7 @@ from loom.core.events import EventBus, Notice, Usage
 
 if TYPE_CHECKING:
     from loom.broker.registry import ToolPackage
+    from loom.broker.secrets import SecretStore
     from loom.providers.registry import ProviderFactory
     from loom.session.store import SessionLog
     from loom.tools.base import Tool, ToolResult
@@ -31,6 +32,7 @@ HookEvent = Literal[
     "before_broker_call",
     "after_broker_call",
     "turn_finished",
+    "shutdown",
 ]
 HOOK_EVENTS: frozenset[str] = frozenset(HookEvent.__args__)  # type: ignore[attr-defined]
 
@@ -121,11 +123,22 @@ class ExtensionCommand:
     handler: CommandHandler
 
 
+@dataclass(frozen=True)
+class ExtensionEnv:
+    """What `register(api)` can read from the host: `[packages.*]` config, secrets, loom's home."""
+
+    packages: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    secrets: SecretStore | None = None
+    home: Path | None = None
+
+
 class ExtensionAPI:
     """Passed to an extension's `register(api)`."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, env: ExtensionEnv | None = None) -> None:
         self.name = name
+        self.env = env or ExtensionEnv()
+        self.notices: list[str] = []
         self.hooks: list[Hook] = []
         self.commands: list[ExtensionCommand] = []
         self.packages: list[ToolPackage] = []
@@ -157,6 +170,19 @@ class ExtensionAPI:
 
         return register
 
+    def package_config(self, name: str) -> dict[str, Any]:
+        """The `[packages.<name>]` table (restricted: a project sets it only when trusted)."""
+        return dict(self.env.packages.get(name, {}))
+
+    def secret(self, name: str) -> str | None:
+        """Resolve a secret on the host; the value is registered with the redactor. Tool
+        packages should use `ctx.secret`: this is for what connects before a session exists."""
+        return self.env.secrets.get(name) if self.env.secrets is not None else None
+
+    def notice(self, text: str) -> None:
+        """Show `text` to the user when the session starts."""
+        self.notices.append(f"Extension {self.name}: {text}")
+
     def add_tool_package(self, package: ToolPackage) -> None:
         self.packages.append(package)
 
@@ -179,6 +205,7 @@ class Extensions:
     packages: list[ToolPackage] = field(default_factory=list)
     providers: dict[str, ProviderFactory] = field(default_factory=dict)
     tools: list[Tool] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
     def add(self, api: ExtensionAPI) -> None:
         self.names.append(api.name)
@@ -187,6 +214,7 @@ class Extensions:
         self.packages.extend(api.packages)
         self.providers.update(api.providers)
         self.tools.extend(api.tools)
+        self.notices.extend(api.notices)
 
 
 # --- the hook runner -----------------------------------------------------------------

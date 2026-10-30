@@ -1,5 +1,23 @@
 # Changelog
 
+
+## M11 — MCP adapter and polish
+
+- `packages/loom-mcp`: extension connecting to `[packages.mcp.servers.*]` over stdio or streamable
+  HTTP (MCP SDK 2.x); each tool becomes `mcp_<server>.<tool>` with a real signature, effect from
+  annotations (`destructiveHint` first), `secret:` values for `env`/`headers`, server stderr in
+  `~/.loom/logs/`. Connections live on their own thread and loop for the whole process.
+- Extensions: installed ones via entry-point group `loom.extensions`; `api.package_config`,
+  `api.secret`, `api.notice`; `shutdown` hook.
+- `loom -p "prompt"`: answer on stdout, everything else on stderr, exit 0/1/2/130; approvals that
+  would ask are denied; never asks for trust.
+- `/tutorial` on the demo package, with a hint on the very first run.
+- Decisions made while implementing (docs updated):
+  - The MCP config lives in `[packages.mcp]`, so it is already restricted and needs no core schema.
+  - Invariant 4 now names `api.secret` as a consumer: servers connect before any broker exists.
+  - Unannotated MCP tools stay `write` as the doc said, although MCP's spec assumes destructive.
+  - No reconnection in v1; a dropped server raises `ToolError` until loom restarts.
+
 ## M10 — Sub-agents
 
 - `loom.agents.subagent`: `agents.run(task, model=, max_turns=)` and

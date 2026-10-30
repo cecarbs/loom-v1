@@ -32,7 +32,7 @@ from loom.core.context import (
 from loom.core.events import EventBus
 from loom.core.mentions import expand_mentions
 from loom.core.messages import Block, TextBlock
-from loom.extensions.api import Extensions, Hooks, SessionStart
+from loom.extensions.api import ExtensionEnv, Extensions, Hooks, SessionStart
 from loom.extensions.loader import extension_files, load_extensions
 from loom.extensions.trust import project_extensions_dir
 from loom.kernel.client import ExecClock, KernelClient
@@ -355,10 +355,12 @@ class App:
         self.home = home
         self.secrets = secrets or SecretStore(keychain=KeyringKeychain())
         self.notices: list[str] = []
+        self.first_run = not (self.loom_home / "sessions").exists()
         if extensions is None:
             extensions, notices = self._load_extensions(trusted)
             self.notices.extend(notices)
         self.extensions = extensions
+        self.notices.extend(extensions.notices)
         self._make_provider = provider_factory or (
             lambda p: create_provider(p, self.secrets, extra=self.extensions.providers)
         )
@@ -396,7 +398,8 @@ class App:
                     f"Project extensions in {project_dir} were not loaded: the workspace is "
                     "not trusted."
                 )
-        extensions, load_notices = load_extensions(files)
+        env = ExtensionEnv(self.config.packages, self.secrets, self.loom_home)
+        extensions, load_notices = load_extensions(files, env, installed=True)
         return extensions, notices + load_notices
 
     def _prompt_extras(self) -> PromptExtras:
@@ -511,6 +514,7 @@ class App:
 
     async def aclose(self) -> None:
         await self._stop_kernels()
+        await self.agent.hooks.after("shutdown", None)
         await self.backend.stop()
         if self.tracer is not None:
             await asyncio.to_thread(self.tracer.shutdown)  # flushes the last spans

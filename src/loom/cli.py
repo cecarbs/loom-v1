@@ -22,6 +22,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Terminal agent harness with a sandboxed, persistent code-mode kernel.",
     )
     parser.add_argument("--version", action="version", version=f"loom {__version__}")
+    parser.add_argument(
+        "-p",
+        "--print",
+        dest="prompt",
+        metavar="PROMPT",
+        help="one shot: run PROMPT, print the final answer, exit (approvals that would ask are "
+        "denied; use --mode to allow more)",
+    )
     parser.add_argument("--model", metavar="ALIAS", help="model alias to use")
     parser.add_argument("--mode", choices=get_args(ApprovalMode), help="approval mode")
     parser.add_argument("--sandbox", choices=get_args(SandboxBackendName), help="sandbox backend")
@@ -92,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path.cwd().resolve()
     try:
         # Only the interactive run asks; subcommands use an existing grant.
-        trusted = workspace_trust(workspace, ask=args.command is None and sys.stdin.isatty())
+        interactive = args.command is None and args.prompt is None and sys.stdin.isatty()
+        trusted = workspace_trust(workspace, ask=interactive)
         loaded = load_config(workspace, cli=cli_overrides(args), trusted=trusted)
     except ConfigError as e:
         print(f"loom: {e}", file=sys.stderr)
@@ -109,16 +118,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.docker:
             return setup_docker(loaded.config.sandbox)
         return setup_seatbelt(loaded.config.sandbox, loom_home())
+    if args.prompt is not None and not args.prompt.strip():
+        print("loom: -p needs a prompt", file=sys.stderr)
+        return 2
+    options: dict[str, Any] = {
+        "model": args.model,
+        "resume": args.resume,
+        "resume_latest": args.continue_,
+        "trusted": trusted,
+    }
     try:
-        asyncio.run(
-            _interactive(
-                loaded.config,
-                model=args.model,
-                resume=args.resume,
-                resume_latest=args.continue_,
-                trusted=trusted,
-            )
-        )
+        if args.prompt is not None:
+            return asyncio.run(_one_shot(loaded.config, args.prompt, **options))
+        asyncio.run(_interactive(loaded.config, **options))
     except (SandboxUnavailable, SessionError) as e:
         print(f"loom: {e}", file=sys.stderr)
         return 2
@@ -146,7 +158,8 @@ def workspace_trust(workspace: Path, *, ask: bool) -> bool:
         print("  Extensions run as you on this machine, outside the sandbox.", file=sys.stderr)
     if request.config_keys:
         print(
-            "  These settings can choose model endpoints, credentials and tool packages.",
+            "  These settings can choose model endpoints, credentials, tool packages and "
+            "commands to run.",
             file=sys.stderr,
         )
     print(
@@ -307,6 +320,18 @@ def trace_command(ref: str | None, *, last: int | None = None, code: bool = Fals
     lines = render_trace(trace, last=last, code=code)
     print("\n".join(lines) if lines else "(no turns yet)")
     return 0
+
+
+async def _one_shot(config: LoomConfig, prompt: str, **options: Any) -> int:
+    from loom.app import App
+    from loom.oneshot import OneShot
+
+    app = App(Path.cwd().resolve(), config, **options)
+    await app.start()
+    try:
+        return await OneShot(app).run(prompt)
+    finally:
+        await app.aclose()
 
 
 async def _interactive(

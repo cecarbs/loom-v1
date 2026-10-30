@@ -406,6 +406,36 @@ def builtin_commands(
     return registry
 
 
+TUTORIAL = """\
+A short tour on made-up web logs and support tickets; nothing here touches a real system.
+Type each quoted line as a message.
+
+1. Code mode: "Using the demo tools, which host had the most 500 errors, and when?"
+   The rows land in a kernel variable; only the summary the code prints reaches the model.
+2. The kernel persists: run /kernel to see that variable, then ask a follow-up:
+   "From those rows, what was the p95 latency on /checkout by hour?"
+3. Approvals: "Open a demo ticket for this incident."
+   Writes to outside systems stop for your answer, whatever the code that made them.
+4. Undo: "Write a short incident note to incident.md", then /undo to restore the workspace.
+5. Trace: /trace shows every model call, kernel execution and tool call of this session.
+
+Next: /tools to browse functions, /skills, /help. Scripts can use: loom -p "<prompt>"
+"""
+
+
+def _tutorial(ctx: CommandContext, args: str) -> None:
+    if "demo" not in ctx.app.broker.packages:
+        ctx.console.print(
+            Text(
+                "The tutorial needs the demo tools. Install loom-tools-demo next to loom, "
+                "then restart.",
+                style="yellow",
+            )
+        )
+        return
+    ctx.console.print(Text(TUTORIAL))
+
+
 def _trace(ctx: CommandContext, args: str) -> None:
     from loom.tracing.log import build_trace, render_trace
 
@@ -425,6 +455,7 @@ def _trace(ctx: CommandContext, args: str) -> None:
 
 BUILTINS = (
     Command("help", "list commands", _help),
+    Command("tutorial", "a short tour using the demo tools", _tutorial),
     Command("model", "show or switch the model", _model, "[alias]"),
     Command("cost", "token usage and cost for this session", _cost),
     Command("clear", "start a new session in this workspace", _clear),

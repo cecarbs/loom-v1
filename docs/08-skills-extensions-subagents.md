@@ -32,7 +32,7 @@ An example skill ships in `examples/skills/splunk-triage/`; copy it to `~/.loom/
 
 Python modules that customize loom without forking it.
 
-Locations: `~/.loom/extensions/*.py` (trusted) and `<workspace>/.loom/extensions/*.py` (requires a one-time trust prompt per workspace, stored in `~/.loom/trust.json` so loom never rewrites the user's TOML). Files starting with `_` are skipped (helpers). Each module is imported on the host and its `register(api)` called once per loom process; the extension's name is the file stem.
+Locations: installed packages (entry-point group `loom.extensions`, pointing at a `register` function; the entry-point name is the extension's name), `~/.loom/extensions/*.py` (trusted) and `<workspace>/.loom/extensions/*.py` (requires a one-time trust prompt per workspace, stored in `~/.loom/trust.json` so loom never rewrites the user's TOML). Files starting with `_` are skipped (helpers). Each module is imported on the host and its `register(api)` called once per loom process, before the first session is built; a file's extension name is its stem. An extension whose name is already loaded is skipped with a notice.
 
 Trust: when the workspace has project extensions, or project-config settings that are ignored untrusted, interactive `loom` lists them and asks `Trust <workspace>? [y/N]` before loading config. The same grant unlocks the restricted keys of the workspace's `.loom/config.toml` (`09-config.md`). The trust record holds a fingerprint (SHA-256) of the project config and every file under `.loom/extensions/` (bytecode caches excluded); if either changes — including by model-written code, since the sandbox can write the workspace — the grant no longer matches and loom asks again. A "no" isn't remembered. Subcommands (`loom models …`) use an existing grant but never ask. Untrusted, project extensions aren't loaded and a notice says so. When the workspace is `$HOME`, its `.loom/extensions` is the user's own dir and needs no grant.
 
@@ -60,6 +60,9 @@ API surface:
 | `api.add_tool_package(pkg)` | Register a `ToolPackage` without an entry point |
 | `api.add_provider(name, factory)` | Register a model provider: `factory(profile, secrets) -> Provider`, used by models with `provider = "<name>"` (built-in names can't be replaced). `loom models …` subcommands don't load extensions. |
 | `api.add_builtin_tool(tool)` | Add a model-visible tool (discouraged; prefer kernel functions) |
+| `api.package_config(name)` | The `[packages.<name>]` config table (restricted, `09-config.md`) |
+| `api.secret(name)` | Resolve a secret on the host, for what connects before a session exists (`register` runs before any `ctx.secret`). The value is registered with the redactor and must stay on the host |
+| `api.notice(text)` | Show `text` at session start, prefixed with the extension's name |
 
 Hook handlers may be sync or async and get one payload (`from loom.extensions import …`):
 
@@ -73,8 +76,9 @@ Hook handlers may be sync or async and get one payload (`from loom.extensions im
 | `before_broker_call` | `BrokerCall(tool, args, effect, call_id)` | mutate `args` (validated again); `Block` → the kernel stub raises `PermissionDenied("Blocked by extension <name>: <reason>")`, before the approval policy runs |
 | `after_broker_call` | `BrokerCall` with `ok`, `value`, `error` | ignored |
 | `turn_finished` | `TurnEnd(usage, cancelled)` | ignored |
+| `shutdown` | `None` | ignored; loom is exiting (not fired on `/clear` or `/resume`: `register` isn't re-run for those, so process-wide resources stay up) |
 
-Hooks run in extension load order (user extensions first, then project, each sorted by file name); the first `Block` wins. Blocks are logged (`hook_block`, and `blocked` on the `broker_call` entry).
+Hooks run in extension load order (installed extensions first, then user, then project, each sorted by name); the first `Block` wins. Blocks are logged (`hook_block`, and `blocked` on the `broker_call` entry).
 
 Extension errors (at import, in `register`, in a hook or a command) are caught, logged, and shown as a notice; they never crash the loop. A hook that raises counts as returning nothing; an extension whose `register` raises is dropped entirely. An example lives in `examples/extensions/no_prod_writes.py`.
 
@@ -98,10 +102,15 @@ results = agents.map(
 - `agents.run` returns the final assistant text (string) and raises `ToolError` if the sub-agent ends without one (model error, empty response, `max_turns` used up). `agents.map` returns a list of strings in task order; a failed sub-agent doesn't stop the others, its entry is `[sub-agent <id> failed: <reason>]`. Cancelling the parent turn stops every sub-agent and its kernel before the turn ends.
 - Full sub-agent transcripts are written to `<session_dir>/agents/<id>.jsonl` (ids `sa1`, `sa2`, …; same record kinds as `session.jsonl`) and referenced by a `subagent` entry in the parent log. The sandbox can't reach them; the `read` tool can, without approval. Their usage and cost count toward the session totals (also after a resume), not toward the parent's context size.
 
-## MCP adapter (extension, later)
+## MCP adapter (`packages/loom-mcp`)
 
-`loom-mcp` extension: connects to configured MCP servers (stdio or streamable HTTP) on the host and registers each MCP tool as a broker tool named `mcp_<server>.<tool>`, with stubs in the kernel like any other package.
+`loom-mcp` is an installable extension (entry-point group `loom.extensions`; install it next to loom). It connects to the servers in `[packages.mcp.servers.<name>]` (`09-config.md`; stdio or streamable HTTP) on the host and registers each MCP tool as a broker tool named `mcp_<server>.<tool>`, with stubs in the kernel like any other package. With no servers configured it does nothing and doesn't import the MCP SDK.
 
-- Effect mapping from MCP tool annotations: `readOnlyHint` → `read`, `destructiveHint` → `destructive`, otherwise `write`.
-- MCP servers run on the host (outside the sandbox) and are trusted like tool packages; their credentials stay host-side.
+- Effect mapping from MCP tool annotations: `destructiveHint` → `destructive`, else `readOnlyHint` → `read`, otherwise `write` (no annotations included; the stricter hint wins if both are set). The approval policy, hooks, logging, redaction and `[approvals.overrides]` all apply as for any broker tool. MCP's own spec treats an unannotated tool as possibly destructive; loom asks for it in `ask` mode, but `auto-write` runs it, so use an override to hold back a specific tool.
+- MCP servers run on the host (outside the sandbox) and are trusted like tool packages; their credentials stay host-side. `env` and `headers` values may be `"secret:<name>"`, resolved on the host; a stdio server gets the SDK's minimal environment plus `env`, nothing else of loom's. Because the config chooses what runs, it is restricted: a project sets it only in a trusted workspace.
 - This makes MCP servers usable in code mode without loading their schemas into the model's context: the model discovers them with `search_tools`.
+- Tool lists have to be known when the session's broker is built, so `register` blocks until every server is up or has failed; servers connect concurrently, each bounded by `startup_timeout_s` (default 30). A server that fails, or a tool that can't be offered, is a notice; the rest still load. Connections live on their own daemon thread and event loop for the whole process (sessions share them) and are closed by the `shutdown` hook.
+- Names become Python identifiers: `-` and other symbols turn into `_`, keywords get a trailing `_` (`class_`), and the call maps them back. Parameters come from the tool's `inputSchema`, required ones first. An optional parameter left at `None` isn't sent. Two tools that map to the same name: the second is skipped with a notice.
+- A call returns `structuredContent` if the server sends it, otherwise the content blocks: text (JSON objects and arrays are parsed), images, audio and resources as dicts; one block is unwrapped. `isError` raises `ToolError` in the kernel, and `[broker] call_timeout_s` applies.
+- A stdio server's stderr goes to `~/.loom/logs/mcp-<server>.log` (on the terminal it would write over the inline UI).
+- No reconnection in v1: calls to a server that dropped raise `ToolError` until loom restarts. Tool list changes during a run aren't picked up.

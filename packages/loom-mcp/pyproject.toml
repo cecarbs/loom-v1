@@ -1,0 +1,16 @@
+[project]
+name = "loom-mcp"
+version = "0.1.0"
+description = "MCP servers as loom kernel tools"
+requires-python = ">=3.12"
+dependencies = ["loom", "mcp>=2.3,<3", "httpx2"]
+
+[project.entry-points."loom.extensions"]
+mcp = "loom_mcp:register"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_mcp"]
