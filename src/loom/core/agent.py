@@ -147,6 +147,7 @@ class AgentLoop:
             await self.bus.emit(ev.TurnCancelled())
             await self.hooks.after("turn_finished", TurnEnd(self.usage, cancelled=True))
             return
+        self.log.append("turn_end", turn=self.turns)
         await self.bus.emit(ev.TurnFinished(self.usage))
         await self.hooks.after("turn_finished", TurnEnd(self.usage))
 

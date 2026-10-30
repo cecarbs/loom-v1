@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("sessions", help="list sessions for this directory")
 
+    trace = commands.add_parser("trace", help="show a session's trace tree")
+    trace.add_argument("session", nargs="?", help="session id or unique prefix (default: latest)")
+    trace.add_argument("--last", type=int, metavar="N", help="only the last N turns")
+    trace.add_argument("--code", action="store_true", help="include kernel code")
+
     secrets = commands.add_parser("secrets", help="manage secrets in the macOS Keychain")
     secrets_cmd = secrets.add_subparsers(dest="action", required=True)
     for action, text in (("set", "store a secret (hidden input)"), ("delete", "remove a secret")):
@@ -82,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return tools_command()
     if args.command == "sessions":
         return sessions_command()
+    if args.command == "trace":
+        return trace_command(args.session, last=args.last, code=args.code)
     workspace = Path.cwd().resolve()
     try:
         # Only the interactive run asks; subcommands use an existing grant.
@@ -283,6 +290,22 @@ def sessions_command() -> int:
         return 0
     Console(highlight=False).print(session_table(sessions))
     print("Resume with: loom --resume <id>   (or loom -c for the latest)")
+    return 0
+
+
+def trace_command(ref: str | None, *, last: int | None = None, code: bool = False) -> int:
+    from loom.session.store import SessionLog, find_session
+    from loom.tracing.log import build_trace, render_trace
+
+    try:
+        paths = find_session(Path.cwd().resolve(), ref)
+    except SessionError as e:
+        print(f"loom: {e}", file=sys.stderr)
+        return 2
+    trace = build_trace(SessionLog(paths.log).read())
+    print(f"session {paths.id}  {trace.session.get('model', '?')}  {paths.log}")
+    lines = render_trace(trace, last=last, code=code)
+    print("\n".join(lines) if lines else "(no turns yet)")
     return 0
 
 

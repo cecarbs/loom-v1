@@ -92,8 +92,8 @@ default_timeout_s = 300
 
 [sandbox]
 backend = "docker"                 # none | seatbelt | docker (default; needs a running Docker daemon)
-network = "none"                   # none | allowlist (later)
-allowlist = []                     # hosts, for allowlist mode
+network = "none"                   # none | allowlist (docs/05 "Network allowlist")
+allowlist = []                     # e.g. ["pypi.org", "files.pythonhosted.org", "*.github.com:443"]
 deny_read = []                     # extra paths
 env_passthrough = []
 python_packages = ["pandas", "numpy", "pyarrow"]
@@ -124,8 +124,8 @@ include_claude = false
 max_concurrency = 4
 
 [tracing]
-otlp_endpoint = ""                 # e.g. http://localhost:6006/v1/traces
-log_tool_results = false
+otlp_endpoint = ""                 # OTLP/HTTP, e.g. http://localhost:6006/v1/traces; needs loom[otel]
+log_tool_results = false           # also log (and export) broker call results
 ```
 
 ## Model entry reference (`[models.<alias>]`)
@@ -163,6 +163,6 @@ loom secrets set|list|delete <name>
 loom models list             configured models (built-in: sonnet, opus, haiku) with resolved capabilities
 loom models test <alias>     probe a model: reply, tool call, image; suggests capability settings
 loom tools list              show catalog (installed `loom.tools` entry points)
-loom trace <session-id>
+loom trace [<id>] [--last N] [--code]   trace tree of a session (default: latest)
 loom sessions                list sessions for cwd
 ```

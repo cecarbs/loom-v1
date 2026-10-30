@@ -10,8 +10,15 @@ import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from loom.sandbox.base import Purpose, SandboxUnavailable, SessionInfo
+from loom.sandbox.base import (
+    NetworkCallback,
+    Purpose,
+    SandboxUnavailable,
+    SessionInfo,
+    proxy_env,
+)
 from loom.sandbox.none import LocalProcess, spawn_local
+from loom.sandbox.proxy import Allowlist, Proxy
 from loom.tools.paths import SENSITIVE_HOME_PATHS
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -30,9 +37,11 @@ def render_profile(
     session: SessionInfo,
     extra_deny: Iterable[Path] = (),
     workspace_writable: bool = True,
+    proxy_port: int | None = None,
 ) -> str:
     """The profile text. Paths are baked in as resolved literals (seatbelt matches real
-    paths, e.g. /private/var rather than /var)."""
+    paths, e.g. /private/var rather than /var). With `proxy_port`, outbound TCP to that
+    localhost port (the allowlist proxy) is the only network allowed."""
     deny = [home / p for p in SENSITIVE_HOME_PATHS]
     deny += [loom_home, *extra_deny]
     deny_lines = "\n".join(f"  (subpath {sbpl_string(_real(p))})" for p in deny)
@@ -47,7 +56,17 @@ def render_profile(
         else ""
     )
     workspace = f"  (subpath {sbpl_string(_real(session.workspace))})" if workspace_writable else ""
-    return TEMPLATE.format(deny_read=deny_lines, ancestors=ancestor_rule, workspace_write=workspace)
+    network = (
+        f'(allow network-outbound (remote tcp "localhost:{int(proxy_port)}"))'
+        if proxy_port is not None
+        else ""
+    )
+    return TEMPLATE.format(
+        deny_read=deny_lines,
+        ancestors=ancestor_rule,
+        workspace_write=workspace,
+        network=network,
+    )
 
 
 def _real(path: Path) -> Path:
@@ -68,6 +87,7 @@ def _ancestors(path: Path, *, stop_above: Path) -> set[Path]:
 
 class SeatbeltBackend:
     name = "seatbelt"
+    on_network: NetworkCallback | None = None
 
     def __init__(
         self,
@@ -76,13 +96,17 @@ class SeatbeltBackend:
         home: Path | None = None,
         python: str | None = None,
         deny_read: Sequence[str] = (),
+        allowlist: Sequence[str] | None = None,  # None: no network at all
     ) -> None:
         self.home = home or Path.home()
         self.loom_home = loom_home
         self.venv = loom_home / "sandbox-venv"
         self.python = python or str(self.venv / "bin" / "python")
         self.deny_read = [Path(p).expanduser() for p in deny_read]
+        self.allowlist = None if allowlist is None else list(allowlist)
         self._session: SessionInfo | None = None
+        self._proxy: Proxy | None = None
+        self._proxy_port: int | None = None
 
     async def start(self, session: SessionInfo) -> None:
         if not Path(SANDBOX_EXEC).exists():
@@ -92,6 +116,14 @@ class SeatbeltBackend:
                 f"the seatbelt kernel Python is missing ({self.python}); run `loom sandbox setup`"
             )
         self._session = session
+        if self.allowlist is not None and self._proxy is None:
+            # In the loom process: sandboxed code can reach this port and nothing else.
+            self._proxy = Proxy(Allowlist(self.allowlist), self._network_event)
+            self._proxy_port = await self._proxy.start("127.0.0.1", 0)
+
+    def _network_event(self, event: dict) -> None:
+        if self.on_network is not None:
+            self.on_network(event)
 
     def profile(self, workspace_writable: bool) -> str:
         if self._session is None:
@@ -102,6 +134,7 @@ class SeatbeltBackend:
             session=self._session,
             extra_deny=self.deny_read,
             workspace_writable=workspace_writable,
+            proxy_port=self._proxy_port,
         )
 
     def params(self) -> list[str]:
@@ -129,10 +162,17 @@ class SeatbeltBackend:
     ) -> LocalProcess:
         # sandbox-exec execs the command, so the pid (and process group) stay the same.
         command = [SANDBOX_EXEC, "-p", self.profile(workspace_writable), *self.params(), *argv]
+        if self._proxy_port is not None:
+            env = {**env, **proxy_env(f"http://127.0.0.1:{self._proxy_port}")}
         return await spawn_local(command, cwd=cwd, env=env, stdin=stdin)
 
     async def stop(self) -> None:
+        if self._proxy is not None:
+            await self._proxy.close()
+        self._proxy = self._proxy_port = None
         self._session = None
 
     def describe(self) -> str:
+        if self.allowlist is not None:
+            return f"seatbelt · net: {len(self.allowlist)} hosts"
         return "seatbelt"

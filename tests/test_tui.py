@@ -562,3 +562,18 @@ async def test_modified_enter_inserts_newline(seq: str) -> None:
 async def test_modified_escape_is_not_inserted_as_text() -> None:
     # Ghostty sent this for Shift+Esc; it used to appear in the prompt as "[27;2;27~".
     assert await _prompt("a\x1b[27;2;27~b\x1b[27;5u\r") == "ab"
+
+
+async def test_trace_command(tmp_path: Path) -> None:
+    app = make_app(tmp_path, [[TextBlock("one")], [TextBlock("two")]])
+    _, out = await _command(app, "/trace")
+    assert "Nothing traced yet." in out
+    await app.submit("first")
+    await app.submit("second")
+    _, out = await _command(app, "/trace")
+    assert 'turn 1  "first"' in out and 'turn 2  "second"' in out
+    assert f"loom trace {app.session_id} --code" in out
+    _, out = await _command(app, "/trace 1")
+    assert 'turn 2  "second"' in out and "turn 1" not in out
+    _, out = await _command(app, "/trace x")
+    assert "Usage: /trace [n]" in out

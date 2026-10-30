@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loom import __version__
 from loom.broker.approval import Approvals
@@ -25,6 +25,7 @@ from loom.core.context import (
     PromptExtras,
     context_file_paths,
     load_context_files,
+    network_section,
 )
 from loom.core.events import EventBus
 from loom.core.mentions import expand_mentions
@@ -65,6 +66,9 @@ from loom.tools.builtin.write import WriteTool
 from loom.tools.paths import PathPolicy, ReadSet
 
 ProviderFactory = Callable[[ModelProfile], Provider]
+
+if TYPE_CHECKING:
+    from loom.tracing.otel import OtelExporter
 
 
 def build_agent(
@@ -118,6 +122,7 @@ def build_agent(
         skills=[s.name for s in skills],
     )
     hooks = Hooks(extensions.hooks, bus=bus, session_log=session_log)
+    backend.on_network = lambda event: session_log.append("network", **event)
 
     env = sandbox_env(session, config.sandbox.env_passthrough)
     workspace_writable = config.approvals.mode != "read-only"
@@ -251,6 +256,7 @@ class App:
         self.skills: list[Skill] = []
         self._pending_skills: list[Skill] = []
         self.backend = create_backend(config.sandbox, loom_home=home)
+        self.tracer = self._make_tracer()
         paths = None
         if resume is not None or resume_latest:
             paths = find_session(workspace, resume, home)
@@ -292,12 +298,40 @@ class App:
             )
         )
         lines = [s.prompt_line() for s in self.skills]
-        return PromptExtras(context, lines, notices + skill_notices)
+        sandbox = self.config.sandbox
+        network = (
+            network_section(sandbox.allowlist)
+            if sandbox.network == "allowlist" and self.backend.name != "none"
+            else ""
+        )
+        return PromptExtras(context, lines, notices + skill_notices, network)
+
+    def _make_tracer(self) -> OtelExporter | None:
+        endpoint = self.config.tracing.otlp_endpoint
+        if not endpoint:
+            return None
+        try:
+            from loom.tracing.otel import OtelExporter
+        except ImportError:
+            self.notices.append(
+                "[tracing] otlp_endpoint is set but OpenTelemetry isn't installed; "
+                "install loom[otel] to export traces."
+            )
+            return None
+        return OtelExporter(endpoint)
 
     def _build(self, alias: str | None, resume: SessionPaths | None = None) -> AgentLoop:
         """`alias` None: the resumed session's model, else the default."""
         extras = self._prompt_extras()
         self._prompt_notices = extras.notices
+        agent = self._build_agent(alias, resume, extras)
+        if self.tracer is not None:
+            self.tracer.attach(agent.log, agent.log.path.parent.name)
+        return agent
+
+    def _build_agent(
+        self, alias: str | None, resume: SessionPaths | None, extras: PromptExtras
+    ) -> AgentLoop:
         return build_agent(
             self.workspace,
             self.config,
@@ -342,6 +376,13 @@ class App:
     async def start(self) -> None:
         """Prepare the sandbox for this session (and start the kernel if `eager`)."""
         await self.backend.start(self._session_info())
+        if self.tracer is not None and self.tracer.on_error is None:
+            loop = asyncio.get_running_loop()
+
+            def notice(text: str) -> None:  # called from the exporter's thread
+                loop.call_soon_threadsafe(lambda: loop.create_task(self.bus.emit(ev.Notice(text))))
+
+            self.tracer.on_error = notice
         if self.config.kernel.eager:
             await self.kernel.start()
         await self.agent.hooks.after(
@@ -352,6 +393,8 @@ class App:
     async def aclose(self) -> None:
         await self.kernel.shutdown()
         await self.backend.stop()
+        if self.tracer is not None:
+            await asyncio.to_thread(self.tracer.shutdown)  # flushes the last spans
         release_lock(self.session_paths)
 
     @property

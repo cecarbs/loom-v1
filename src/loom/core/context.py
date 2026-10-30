@@ -49,6 +49,7 @@ class PromptExtras:
     context_files: str = ""  # rendered "# Context files" section, may be empty
     skill_lines: Sequence[str] = ()
     notices: list[str] = field(default_factory=list)
+    network: str = ""  # rendered "# Network" section (allowlist mode only)
 
 
 def context_file_paths(workspace: Path, home: Path) -> list[Path]:
@@ -96,6 +97,16 @@ def load_context_files(paths: Sequence[Path], max_chars: int) -> tuple[str, list
     return "# Context files\n" + body, notices
 
 
+def network_section(allowlist: Sequence[str]) -> str:
+    hosts = ", ".join(allowlist) or "(none)"
+    return (
+        "# Network\n"
+        f"`bash` and `execute` can reach only these hosts, through loom's proxy: {hosts}. "
+        "Other hosts are refused by the proxy (HTTP 403, or curl's \"CONNECT tunnel failed, "
+        "response 403\"); that is loom's sandbox policy, not the remote server."
+    )
+
+
 def render_system_prompt(
     workspace: Path,
     tool_names: Sequence[str],
@@ -112,6 +123,8 @@ def render_system_prompt(
         ).strip()
     ]
     if extras is not None:
+        if extras.network:
+            sections.append(extras.network)
         if extras.context_files:
             sections.append(extras.context_files)
         if extras.skill_lines:

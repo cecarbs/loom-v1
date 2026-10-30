@@ -263,11 +263,13 @@ async def test_docker_read_only_switch_recreates_the_container(world: World) -> 
         out = await box.bash("echo y > b.txt && echo WROTE || echo denied")
         assert "denied" in out and backend.container == first  # type: ignore[attr-defined]
         # Same name, new container: check it really is mounted read-only now.
+        # Check the workspace mount by path: docker doesn't list mounts in a fixed order.
         inspect = subprocess.run(
-            ["docker", "inspect", "-f", "{{range .Mounts}}{{.RW}} {{end}}", first],
+            ["docker", "inspect", "-f", "{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}", first],
             capture_output=True, text=True,
         )  # fmt: skip
-        assert inspect.stdout.split()[0] == "false"
+        rw = dict(m.rsplit("=", 1) for m in inspect.stdout.split())
+        assert rw[str(world.workspace.resolve())] == "false"
     finally:
         await box.close()
     gone = subprocess.run(["docker", "inspect", first], capture_output=True)

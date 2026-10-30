@@ -217,7 +217,8 @@ Keep it short (target < 1,000 tokens). It contains:
    - Aggregate in the source system (e.g. SPL `stats`) and in code; **print summaries, never raw bulk data**.
    - Variables persist in the kernel; refer to them in later steps instead of re-fetching.
    - Use `read`/`edit`/`write` for files, `bash` for shell commands.
-3. Context files (AGENTS.md / CLAUDE.md contents), appended under `# Context files` (`08-…`).
-4. Skills list, appended under `# Skills`: one intro line, then one `- name — description (path)` line per skill.
+3. Only in `network = "allowlist"` mode (not with the `none` backend): a `# Network` section naming the reachable hosts and saying that a proxy 403 is loom's policy (`05-…`).
+4. Context files (AGENTS.md / CLAUDE.md contents), appended under `# Context files` (`08-…`).
+5. Skills list, appended under `# Skills`: one intro line, then one `- name — description (path)` line per skill.
 
 The system prompt must stay byte-stable within a session so prompt caching works. Dynamic state is **not** put in it: the kernel inventory travels in the compaction summary (`07-…`), and kernel restarts are reported by the `[kernel restarted …]` prefix of the next `execute` result.

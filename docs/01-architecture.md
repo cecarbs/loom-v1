@@ -168,9 +168,10 @@ loom/
       seatbelt.py
       seatbelt.sb.tmpl
       docker.py         # drives the docker CLI
+      proxy.py          # network allowlist proxy (stdlib-only; also runs in a docker sidecar)
       Dockerfile
     session/{store,checkpoints}.py
-    tracing/{log,otel}.py
+    tracing/{log,otel}.py              # trace tree from the session log; OTel export
     skills/loader.py
     extensions/{api,loader,trust}.py   # API + hook runner, module loader, workspace trust
     agents/subagent.py

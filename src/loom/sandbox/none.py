@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from loom.sandbox.base import STREAM_LIMIT, Purpose, SessionInfo
+from loom.sandbox.base import STREAM_LIMIT, NetworkCallback, Purpose, SessionInfo
 
 EXIT_POLL_S = 0.02
 
@@ -67,8 +67,11 @@ async def spawn_local(
 
 
 class NoneBackend:
+    """Host network: `[sandbox] network` has no effect here."""
+
     name = "none"
     python = sys.executable
+    on_network: NetworkCallback | None = None
 
     async def start(self, session: SessionInfo) -> None:
         pass

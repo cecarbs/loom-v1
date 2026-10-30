@@ -406,6 +406,23 @@ def builtin_commands(
     return registry
 
 
+def _trace(ctx: CommandContext, args: str) -> None:
+    from loom.tracing.log import build_trace, render_trace
+
+    arg = args.strip()
+    if arg and not arg.isdigit():
+        ctx.console.print(Text("Usage: /trace [n]  (the last n turns)", style="dim"))
+        return
+    trace = build_trace(ctx.app.agent.log.read())
+    lines = render_trace(trace, last=int(arg) if arg else None)
+    if not lines:
+        ctx.console.print(Text("Nothing traced yet.", style="dim"))
+        return
+    for line in lines:
+        ctx.console.print(Text(line, no_wrap=True, overflow="ellipsis"))
+    ctx.console.print(Text(f"Kernel code: loom trace {ctx.app.session_id} --code", style="dim"))
+
+
 BUILTINS = (
     Command("help", "list commands", _help),
     Command("model", "show or switch the model", _model, "[alias]"),
@@ -413,6 +430,7 @@ BUILTINS = (
     Command("clear", "start a new session in this workspace", _clear),
     Command("sessions", "list this workspace's sessions", _sessions),
     Command("resume", "switch to another session", _resume, "<id>"),
+    Command("trace", "show this session's trace tree", _trace, "[n]"),
     Command("compact", "summarize older messages to free context", _compact, "[instructions]"),
     Command("undo", "restore files to a checkpoint", _undo, "[n]"),
     Command("kernel", "show kernel variables, or restart it", _kernel, "[reset]"),

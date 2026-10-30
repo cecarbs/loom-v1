@@ -36,5 +36,7 @@
   (literal "/dev/dtracehelper")
   (regex #"^/dev/fd/"))
 
-;; No network at all: tools reach the outside world only through the broker.
+;; No network: tools reach the outside world only through the broker. In allowlist mode
+;; the one exception is loom's filtering proxy on localhost.
 (deny network*)
+{network}

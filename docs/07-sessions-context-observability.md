@@ -26,7 +26,7 @@
 
 ## Session log (`loom.session.store`)
 
-Append-only JSONL, written only by the host process (never writable from the sandbox). Every line: `{"ts": ..., "kind": ..., ...}`. All lines pass through the redactor before writing.
+Append-only JSONL, written only by the host process (never writable from the sandbox). Every line: `{"ts": ..., "kind": ..., ...}`. All lines pass through the redactor before writing. `ts` is when the line is written, i.e. when the thing it records ended; records with `duration_ms` / `latency_ms` started that much earlier. Listeners on the log (the OTel exporter) receive each record as written.
 
 | kind | contents |
 |---|---|
@@ -43,6 +43,8 @@ Append-only JSONL, written only by the host process (never writable from the san
 | `undo` | checkpoint sha restored, files restored, files removed |
 | `note` | text queued for the model's next prompt (e.g. after `/undo`) |
 | `session_resume` | like `session_start`, appended when a session is resumed |
+| `turn_end` / `turn_cancelled` | a turn finished (turn number) / was cancelled |
+| `network` | an allowlist-proxy connection attempt: method, host, port, allowed (or error) |
 | `error`, `notice` | text |
 
 Resume (`loom -c` for latest, `loom --resume <id>` with an id or unique prefix, `/resume <id>` in the TUI) rebuilds history from `message` and `compaction` entries, plus turn count, token usage and cost (`model_request` entries carry `cost_usd`), checkpoints, and undelivered `note`s. It continues on the session's last model unless `--model` is given. The kernel does **not** survive restarts: if the session used it, the next prompt carries a note that the kernel is fresh. Not restored: "allow for this session" approval grants, the approval mode (comes from config/CLI), and the read set (files must be read again before `edit`). `model_request` entries also carry `purpose` (`turn` or `compaction`).
@@ -75,7 +77,7 @@ The kernel is effectively a second, larger memory: the prompt tells the model to
 
 ## Observability (`loom.tracing`)
 
-**Level 1 — built in:** the session JSONL is the trace. `loom trace <session-id>` prints a tree:
+**Level 1 — built in:** the session JSONL is the trace. `loom.tracing.log.build_trace` turns its records into a span tree (turn → model calls and tool calls; an `execute` call → its kernel execution → the broker calls made during it, which is unambiguous because executions are serialized). Approvals, checkpoints, network attempts, kernel start/exit and errors are point events on the span they happened in. `loom trace [<session-id>] [--last N] [--code]` (default: the latest session) prints it:
 
 ```
 turn 3  "why did checkout errors spike"            14.2s  $0.06
@@ -86,6 +88,8 @@ turn 3  "why did checkout errors spike"            14.2s  $0.06
 └─ model  sonnet  in 13.0k out 520                 3.8s
 ```
 
-`/trace` in the TUI shows the same for the current session.
+`/trace [n]` in the TUI shows the same for the current session (the last n turns). `--code` adds each execution's code under its node. Turns without a `turn_end` (logs from before it existed, a crash) count as finished unless a tool call has no result.
 
-**Level 2 — OpenTelemetry (optional extra `loom[otel]`):** when `[tracing] otlp_endpoint` is set, emit spans: `agent.turn` → `llm.call`, `tool.call` → `kernel.execute` → `broker.call`. Use OpenInference semantic conventions for attribute names so traces render well in Arize Phoenix and other OTel backends. Include code text on `kernel.execute` spans; never include secrets (spans go through the redactor).
+**Level 2 — OpenTelemetry (optional extra `loom[otel]`):** when `[tracing] otlp_endpoint` is set (OTLP/HTTP protobuf, e.g. `http://localhost:6006/v1/traces` for Arize Phoenix), `loom.tracing.otel` exports the same span tree: `agent.turn` → `llm.call`, `tool.call` → `kernel.execute` → `broker.call`, one trace per turn, sent when the turn's `turn_end`/`turn_cancelled` record is written (an unfinished turn is sent at exit). Spans are built from the log records, so they hold only redacted data and always match `loom trace`. Point events become span events; events outside any turn aren't exported.
+
+Attributes follow OpenInference: `openinference.span.kind` (`AGENT` turn, `LLM`, `TOOL` tool and broker calls, `CHAIN` kernel execution), `session.id`, `input.value` / `output.value` (the prompt; tool args and the result the model saw; the execution's **code**; broker results only with `[tracing] log_tool_results`), `llm.model_name`, `llm.provider`, `llm.invocation_parameters`, `llm.token_count.{prompt,completion,total}` and `.prompt_details.cache_{read,write}`, `llm.cost.total`, `tool.name`, plus `loom.*` extras (alias, purpose, stop reason, exec id, effect, decision). Values are clipped at 8000 chars. Resource: `service.name = loom`, `openinference.project.name = loom`. If the extra isn't installed, loom starts with a notice; a failed export (no collector) is one notice, never an error in the session.

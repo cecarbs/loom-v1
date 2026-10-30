@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from loom.config import SandboxConfig
 
 Purpose = Literal["bash", "kernel"]
+# Receives each connection attempt seen by the allowlist proxy (logged as `network`).
+NetworkCallback = Callable[[dict[str, Any]], None]
 
 # Host variables a sandboxed process may see (plus `[sandbox] env_passthrough`). HOME and
 # TMPDIR are replaced with the session's sandbox dirs.
@@ -61,6 +63,7 @@ class SandboxProcess(Protocol):
 class SandboxBackend(Protocol):
     name: str
     python: str  # interpreter that runs the kernel runner inside this sandbox
+    on_network: NetworkCallback | None  # set by the app before start()
 
     async def start(self, session: SessionInfo) -> None: ...
 
@@ -100,6 +103,12 @@ def sandbox_env(
     return env
 
 
+def proxy_env(url: str) -> dict[str, str]:
+    """Point HTTP clients (curl, pip, requests, urllib) at the allowlist proxy."""
+    names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+    return {k: url for name in names for k in (name, name.lower())}
+
+
 def create_backend(cfg: SandboxConfig, *, loom_home: Path | None = None) -> SandboxBackend:
     """The configured backend. Availability (daemon, venv, image) is checked in start()."""
     from loom.session.store import loom_home as default_loom_home
@@ -113,7 +122,11 @@ def create_backend(cfg: SandboxConfig, *, loom_home: Path | None = None) -> Sand
         case "seatbelt":
             from loom.sandbox.seatbelt import SeatbeltBackend
 
-            return SeatbeltBackend(loom_home=loom_home, deny_read=cfg.deny_read)
+            return SeatbeltBackend(
+                loom_home=loom_home,
+                deny_read=cfg.deny_read,
+                allowlist=cfg.allowlist if cfg.network == "allowlist" else None,
+            )
         case "docker":
             from loom.sandbox.docker import DockerBackend
 

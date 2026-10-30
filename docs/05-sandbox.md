@@ -43,8 +43,8 @@ Every backend starts processes in a **new session / process group** (`start_new_
 | Backend | Isolation | Network | Startup | Use for |
 |---|---|---|---|---|
 | `none` | none | host | instant | Development of loom itself only. Prints a red warning in the footer. |
-| `seatbelt` | macOS `sandbox-exec` profile | denied | ~instant | When Docker isn't available; fast daily use on your own repos |
-| `docker` (default) | container (Docker Desktop, OrbStack, or Colima) | `none` by default | 1–2 s per session | Everything by default: strongest isolation, also for untrusted data or code |
+| `seatbelt` | macOS `sandbox-exec` profile | denied (or allowlist) | ~instant | When Docker isn't available; fast daily use on your own repos |
+| `docker` (default) | container (Docker Desktop, OrbStack, or Colima) | `none` by default (or allowlist) | 1–2 s per session | Everything by default: strongest isolation, also for untrusted data or code |
 
 With the default `docker` backend, loom checks at startup that the daemon answers and the image exists. If not, it exits with a message saying how to fix it (`start Docker Desktop`, `loom sandbox setup --docker`) or to choose `--sandbox seatbelt` explicitly. It never falls back to a weaker backend on its own.
 
@@ -59,8 +59,7 @@ Profile template (`seatbelt.sb.tmpl`) policy:
 - Rule order matters: in SBPL the last matching rule wins, so the profile is broad allows → denylist → carve-outs. Directories on the way to the carve-outs (`~/.loom`, `~/.loom/sessions/<project>`, …) get `file-read-metadata` only (stat, not list). That rule is never rendered empty: `(allow file-read-metadata)` with no filter would allow everything.
 - setuid binaries (e.g. `/bin/ps`) can't be exec'd inside the sandbox.
 - **Writes:** only the workspace (omitted when `workspace_writable=False`) and `<session_dir>/sandbox/`.
-- **Network:** denied entirely (`(deny network*)`). The kernel needs no network: tools go through the broker over stdio.
-- Optional (M9+): `network = "allowlist"` mode, implemented by allowing outbound only to a local filtering proxy on 127.0.0.1 and setting `HTTPS_PROXY` for sandboxed processes.
+- **Network:** denied entirely (`(deny network*)`). The kernel needs no network: tools go through the broker over stdio. In allowlist mode the profile adds one rule after the deny, `(allow network-outbound (remote tcp "localhost:<proxy port>"))` (see "Network allowlist").
 
 Kernel Python for seatbelt: a dedicated venv at `~/.loom/sandbox-venv`, created by `loom sandbox setup` (`uv venv --python 3.12`, then `uv pip install` of `[sandbox] python_packages`, default `pandas numpy pyarrow`; falls back to `python -m venv` + pip without uv). If it's missing, `start()` says to run `loom sandbox setup`. The runner file is copied into the session dir at kernel start.
 
@@ -87,15 +86,28 @@ docker run -d --name loom-<session> --init
 - `spawn()` uses `docker exec [-i] -w <cwd> -e … <ctr> sh -c 'echo $$ > "$0"; exec "$@"' <pidfile> <argv…>` via the CLI (`asyncio.create_subprocess_exec`); no Docker Python SDK. The docker CLI process runs with the host environment (contexts, `DOCKER_HOST`); the container process gets the allowlisted env without `PATH` (the image's own) and with `LANG=C.UTF-8` (the host locale usually isn't installed in the image).
 - Killing the host `docker exec` does **not** stop the process inside the container. So each exec'd process writes its in-container pid to `<session_dir>/sandbox/pids/<token>`, and `send_signal`/`kill` run `docker exec <ctr> sh -c 'kill -<sig> <pid>'` / `kill -9 -- -<pid>` (exec'd processes lead their own session and process group in the container, so the group kill takes their children too).
 - The kernel runner is spawned with `docker exec -i … python -I <session_dir>/sandbox/runner.py`; interrupts reach it through the pid file as above.
+- In allowlist mode `--network none` becomes the session's internal network (see "Network allowlist").
 - `workspace_writable` is fixed per container; switching into/out of read-only mode recreates the container (kernel restart).
 - Image built from `sandbox/Dockerfile` by `loom sandbox setup --docker`: `python:3.12-slim` + `[sandbox] python_packages` + common CLIs (`git`, `ripgrep`, `jq`, `curl`, `procps`).
 - Mounting the workspace at the **same absolute path** means paths in tool output match host paths, so `read`/`edit` work on them directly.
 - Container removed in `stop()` and on startup cleanup of stale `loom-*` containers.
+
+## Network allowlist
+
+`[sandbox] network = "allowlist"` lets sandboxed processes reach the hosts in `[sandbox] allowlist`, and nothing else, through a filtering HTTP proxy (`loom.sandbox.proxy`). The backend sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (and lower-case variants) for every sandboxed process, so curl, pip, `requests` and `urllib` use it. The `none` backend has the host network and ignores the setting.
+
+- **Entries** are host names or IPs, optionally with a port: `pypi.org` (any port), `api.github.com:443`, `*.githubusercontent.com` (subdomains only, not the domain itself), `[::1]:8080`. URLs (`https://…`) and paths are config errors. Matching is case-insensitive and ignores a trailing dot.
+- **The proxy** handles `CONNECT host:port` (HTTPS; it tunnels bytes and never sees plaintext) and absolute-form `http://` requests. Other requests get `400`, non-allowlisted hosts get `403 … not in the sandbox allowlist`. It resolves names itself, so the sandbox needs no DNS. Each attempt is logged as a `network` record (method, host, port, allowed, or error).
+- **seatbelt:** the proxy runs in the loom process on `127.0.0.1:<random port>`, and that port is the profile's only network exception.
+- **docker:** the container joins a per-session `docker network create --internal` network (no route out, no external DNS) instead of `--network none`. Its only other member is a sidecar container, `loom-…-proxy`, from the same image, on the default bridge as well, with alias `loom-proxy` on the internal network: `--cap-drop ALL --security-opt no-new-privileges --read-only --pids-limit 64 --memory 256m --user <uid>:<gid>`, no mounts, running `python -I -c <proxy source> --listen 0.0.0.0:3128 --allow <json>`. The source is passed on the command line, so nothing the sandbox can write is ever run by the proxy. Loom follows `docker logs -f` of the sidecar for the `network` records. The network and sidecar carry the same labels as the container; `stop()` and stale cleanup remove them too.
+- `proxy.py` is stdlib-only and must run on any Python ≥ 3.11, like the kernel runner.
 
 ## Threat model (what this does and does not protect against)
 
 Protects against: model-written code exfiltrating data over the network, reading credentials from disk, writing outside the workspace, runaway processes (Docker limits; seatbelt relies on timeouts).
 
 Does not protect against: a malicious **tool package** (runs on host, trusted like any dependency), the model misusing an approved write tool (approvals and audit logs cover this), or sandboxed code reading secrets that live **inside the workspace** (e.g. `.env`) and printing them into the model context.
+
+Allowlist mode: code in the sandbox can send anything it can read to an allowlisted host (e.g. a gist on `api.github.com`). Allowlist only hosts you'd let the model write to. An allowlisted name that resolves to a private address is reached as well, since the proxy doesn't filter by IP.
 
 Prompt injection note: data fetched by tools (logs, tickets) can contain instructions. Because the sandbox has no network and all tool calls are policy-checked, injected code can at worst misuse tools the policy already allows. Keep write tools on `ask`.

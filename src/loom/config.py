@@ -173,6 +173,15 @@ class SandboxConfig(_Model):
     python_packages: list[str] = Field(default_factory=lambda: ["pandas", "numpy", "pyarrow"])
     docker: DockerConfig = Field(default_factory=DockerConfig)
 
+    @field_validator("allowlist")
+    @classmethod
+    def _hosts(cls, value: list[str]) -> list[str]:
+        from loom.sandbox.proxy import parse_entry
+
+        for entry in value:
+            parse_entry(entry)  # ValueError: e.g. "https://x" (hosts only, no scheme or path)
+        return value
+
 
 class ApprovalsConfig(_Model):
     mode: ApprovalMode = "ask"

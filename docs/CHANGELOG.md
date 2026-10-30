@@ -1,5 +1,26 @@
 # Changelog
 
+## M9 — Tracing and network allowlist
+
+- `loom.tracing.log`: the session log as a span tree (turn → model / tool calls; `execute` →
+  kernel execution → broker calls; approvals, checkpoints, network, kernel and error records as
+  point events). `loom trace [<id>] [--last N] [--code]` and `/trace [n]` print it.
+- `loom.tracing.otel` (extra `loom[otel]`): with `[tracing] otlp_endpoint`, each turn is
+  exported over OTLP/HTTP when it ends, built from the (redacted) log records, with
+  OpenInference attributes (code on `kernel.execute`). Missing extra or collector → a notice.
+- `SessionLog.listeners`; new log kinds `turn_end` and `network`.
+- `[sandbox] network = "allowlist"`: a filtering HTTP proxy (`loom.sandbox.proxy`, stdlib-only;
+  `CONNECT` and absolute `http://`) with `HTTP(S)_PROXY` set for sandboxed processes. seatbelt
+  runs it in-process and allows only its localhost port; docker puts the container on a
+  per-session `--internal` network with a locked-down proxy sidecar (source passed with `-c`),
+  cleaned up with the container. Allowlist entries are validated (`host`, `*.domain`, `:port`).
+- Footer shows `docker · net: N hosts` in allowlist mode, and the system prompt gets a `# Network`
+  section naming the hosts (a manual run showed qwen blaming the server for the proxy 403).
+- Docs: `/trace` now shows the tree (06 said "last n tool calls"); allowlist threat note.
+- Fix: with no Anthropic key anywhere, the SDK's `TypeError` crashed the TUI; it is now an
+  `auth` error naming the secret and `ANTHROPIC_API_KEY`.
+- Test fix: the docker read-only test looks up the workspace mount by path (mount order varies).
+
 ## M8 — Context files, skills, extensions
 
 - Context files: `~/.loom/AGENTS.md`, then `AGENTS.md` / `CLAUDE.md` from the git root down to

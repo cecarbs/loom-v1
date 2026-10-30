@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any
 from loom.broker.redact import Redactor
 from loom.core.events import Usage
 from loom.core.messages import Message, TextBlock, ToolResultBlock, message_from_dict
+
+logger = logging.getLogger(__name__)
 
 SESSION_ID_RE = re.compile(r"^\d{8}-\d{4}-[0-9a-f]{4}$")
 
@@ -73,12 +76,17 @@ def new_session(workspace: Path, home: Path | None = None) -> SessionPaths:
     return paths
 
 
+LogListener = Callable[[dict[str, Any]], None]
+
+
 class SessionLog:
-    """Every record passes through the redactor: secret values never reach the log."""
+    """Every record passes through the redactor: secret values never reach the log.
+    Listeners (the OTel exporter) get each record after it was written, redacted."""
 
     def __init__(self, path: Path, redactor: Redactor | None = None) -> None:
         self.path = path
         self.redactor = redactor
+        self.listeners: list[LogListener] = []
 
     def append(self, kind: str, **data: Any) -> None:
         record = {"ts": time.time(), "kind": kind, **data}
@@ -87,6 +95,14 @@ class SessionLog:
         line = json.dumps(record, ensure_ascii=False, default=str)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+        if not self.listeners:
+            return
+        written = json.loads(line)  # exactly what the log holds (default=str applied)
+        for listener in self.listeners:
+            try:
+                listener(written)
+            except Exception:  # an exporter bug must not break the session
+                logger.warning("session log listener failed", exc_info=True)
 
     def read(self) -> list[dict[str, Any]]:
         with self.path.open(encoding="utf-8") as f:

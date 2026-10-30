@@ -8,7 +8,7 @@ from typing import Any
 import anthropic
 import httpx2
 
-from loom.broker.secrets import SecretStore
+from loom.broker.secrets import SecretStore, env_name
 from loom.core.events import Usage
 from loom.core.messages import (
     Block,
@@ -75,6 +75,18 @@ class AnthropicProvider:
             self._client = anthropic.AsyncAnthropic(**kwargs)
         return self._client
 
+    def _no_credentials_message(self) -> str:
+        name = self.profile.api_key_secret
+        if name is None:
+            return (
+                "no Anthropic API key: set [providers.anthropic] api_key_secret and store it "
+                "with `loom secrets set <name>`, or set ANTHROPIC_API_KEY"
+            )
+        return (
+            f"no Anthropic API key: secret {name!r} is not set (`loom secrets set {name}`, "
+            f"or {env_name(name)}) and ANTHROPIC_API_KEY is unset"
+        )
+
     async def stream(self, req: ModelRequest) -> AsyncIterator[ProviderEvent]:
         params = build_params(req, self.profile)
         extra_body = self.profile.extra_body or None
@@ -98,6 +110,9 @@ class AnthropicProvider:
                             yield ToolUseInputDelta(tool_ids[event.index], delta.partial_json)
                 final = await stream.get_final_message()
         except Exception as e:  # SDK and transport errors become ProviderErrors
+            if _no_credentials(e):
+                yield ProviderError("auth", self._no_credentials_message())
+                return
             if not isinstance(
                 e, anthropic.AnthropicError | httpx2.HTTPError | LookupError | ProviderSetupError
             ):
@@ -209,6 +224,12 @@ def usage_from(usage: Any) -> Usage:
         cache_read_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
         cache_write_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0,
     )
+
+
+def _no_credentials(e: Exception) -> bool:
+    """The SDK raises a bare TypeError at request time when no key, token or credentials
+    profile resolved."""
+    return isinstance(e, TypeError) and "Could not resolve authentication method" in str(e)
 
 
 def map_error(e: Exception) -> ProviderError:

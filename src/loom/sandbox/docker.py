@@ -5,12 +5,17 @@ Killing the host `docker exec` process does not stop the process inside the cont
 every exec'd process writes its in-container pid to `<sandbox_dir>/pids/<token>` first.
 Signals and kills are then delivered inside the container. Exec'd processes lead their own
 session and process group there, so `kill -- -PID` takes down their children too.
+
+In `network = "allowlist"` mode the container joins an `--internal` network (no route out,
+no external DNS) whose only other member is a proxy sidecar running `loom.sandbox.proxy`;
+the sidecar is also on the default bridge and connects only to allowlisted hosts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -21,7 +26,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from loom.config import SandboxConfig
-from loom.sandbox.base import Purpose, SandboxUnavailable, SessionInfo
+from loom.sandbox import proxy
+from loom.sandbox.base import (
+    NetworkCallback,
+    Purpose,
+    SandboxUnavailable,
+    SessionInfo,
+    proxy_env,
+)
 from loom.sandbox.none import LocalProcess, spawn_local
 
 LABEL = "loom.sandbox"
@@ -29,6 +41,9 @@ PID_WAIT_S = 2.0
 DOCKER_TIMEOUT_S = 30.0
 # `sh` writes its pid, then becomes the real command.
 EXEC_WRAPPER = 'echo $$ > "$0"; exec "$@"'
+PROXY_ALIAS = "loom-proxy"  # the sidecar's name on the session's internal network
+PROXY_PORT = 3128
+PROXY_READY_S = 15.0
 
 
 class DockerProcess:
@@ -72,6 +87,7 @@ class DockerProcess:
 class DockerBackend:
     name = "docker"
     python = "python"  # the image's interpreter
+    on_network: NetworkCallback | None = None
 
     def __init__(self, cfg: SandboxConfig, *, loom_home: Path) -> None:
         self.cfg = cfg
@@ -81,6 +97,11 @@ class DockerBackend:
         self._session: SessionInfo | None = None
         self._writable: bool | None = None
         self._lock = asyncio.Lock()
+        self.allowlist = list(cfg.allowlist) if cfg.network == "allowlist" else None
+        self.network: str | None = None  # the internal network, once created
+        self.proxy: str | None = None  # the sidecar container
+        self._proxy_logs: LocalProcess | None = None
+        self._proxy_reader: asyncio.Task[None] | None = None
 
     # --- lifecycle ---------------------------------------------------------------------
 
@@ -108,11 +129,23 @@ class DockerBackend:
     async def stop(self) -> None:
         if self.container is not None:
             await _docker("rm", "-f", self.container)
-        self.container = None
+        if self._proxy_logs is not None:
+            self._proxy_logs.kill()
+        if self._proxy_reader is not None:
+            self._proxy_reader.cancel()
+            await asyncio.gather(self._proxy_reader, return_exceptions=True)
+        if self.proxy is not None:
+            await _docker("rm", "-f", self.proxy)
+        if self.network is not None:
+            await _docker("network", "rm", self.network)
+        self.container = self.proxy = self.network = None
+        self._proxy_logs = self._proxy_reader = None
         self._writable = None
         self._session = None
 
     def describe(self) -> str:
+        if self.allowlist is not None:
+            return f"docker · net: {len(self.allowlist)} hosts"
         return "docker"
 
     async def _remove_stale(self) -> None:
@@ -125,6 +158,14 @@ class DockerBackend:
             name, _, pid = line.partition(" ")
             if pid.isdigit() and not _alive(int(pid)):
                 await _docker("rm", "-f", name)
+        _, out, _ = await _docker(
+            "network", "ls", "--filter", f"label={LABEL}=1",
+            "--format", '{{.Name}} {{.Label "loom.host_pid"}}',
+        )  # fmt: skip
+        for line in out.splitlines():
+            name, _, pid = line.partition(" ")
+            if pid.isdigit() and not _alive(int(pid)):
+                await _docker("network", "rm", name)
 
     async def _ensure_container(self, writable: bool) -> str:
         """Create the session's container, or recreate it when the workspace's writability
@@ -139,6 +180,8 @@ class DockerBackend:
             self.container = None
             name = _container_name(self._session)
             await _docker("rm", "-f", name)
+            if self.allowlist is not None and self.network is None:
+                await self._start_proxy(name)
             code, _, err = await _docker(*self.run_args(name, writable))
             if code != 0:
                 raise SandboxUnavailable(f"could not start the sandbox container: {err.strip()}")
@@ -152,7 +195,7 @@ class DockerBackend:
         docker = self.cfg.docker
         return [
             "run", "-d", "--name", name, "--init",
-            "--network", "none",
+            "--network", self.network or "none",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--pids-limit", "512", "--memory", docker.memory, "--cpus", f"{docker.cpus:g}",
             "--read-only", "--tmpfs", "/tmp:rw,size=1g",
@@ -163,11 +206,70 @@ class DockerBackend:
             "-v", f"{out}:{out}:ro",
             "-e", f"HOME={sandbox}/home",
             "-w", ws,
-            "--label", f"{LABEL}=1",
-            "--label", f"loom.host_pid={os.getpid()}",
-            "--label", f"loom.session={s.id}",
+            *self._labels(),
             self.image, "sleep", "infinity",
         ]  # fmt: skip
+
+    def _labels(self) -> list[str]:
+        assert self._session is not None
+        labels = (f"{LABEL}=1", f"loom.host_pid={os.getpid()}", f"loom.session={self._session.id}")
+        return [arg for label in labels for arg in ("--label", label)]
+
+    # --- network allowlist -------------------------------------------------------------
+
+    async def _start_proxy(self, name: str) -> None:
+        """The session's internal network and the proxy sidecar, which is the container's
+        only way out. The proxy's source is passed with -c, so nothing the sandbox can
+        write is ever executed by it."""
+        assert self.allowlist is not None
+        network, sidecar = f"{name}-net", f"{name}-proxy"
+        await _docker("rm", "-f", sidecar)
+        await _docker("network", "rm", network)
+        code, _, err = await _docker("network", "create", "--internal", *self._labels(), network)
+        if code != 0:
+            raise SandboxUnavailable(f"could not create the sandbox network: {err.strip()}")
+        self.network = network
+        source = Path(proxy.__file__).read_text(encoding="utf-8")
+        code, _, err = await _docker(
+            "run", "-d", "--name", sidecar, "--init",
+            "--network", "bridge",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--pids-limit", "64", "--memory", "256m", "--read-only",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            *self._labels(),
+            self.image, "python", "-I", "-c", source,
+            "--listen", f"0.0.0.0:{PROXY_PORT}", "--allow", json.dumps(self.allowlist),
+        )  # fmt: skip
+        if code != 0:
+            raise SandboxUnavailable(f"could not start the network proxy: {err.strip()}")
+        self.proxy = sidecar
+        code, _, err = await _docker("network", "connect", "--alias", PROXY_ALIAS, network, sidecar)
+        if code != 0:
+            raise SandboxUnavailable(f"could not connect the network proxy: {err.strip()}")
+        self._proxy_logs = await spawn_local(
+            ["docker", "logs", "-f", sidecar], cwd=Path.cwd(), env=os.environ, stdin=False
+        )
+        ready = asyncio.get_running_loop().create_future()
+        self._proxy_reader = asyncio.create_task(self._read_proxy_events(ready))
+        try:
+            await asyncio.wait_for(asyncio.shield(ready), PROXY_READY_S)
+        except TimeoutError:
+            raise SandboxUnavailable("the network proxy did not start") from None
+
+    async def _read_proxy_events(self, ready: asyncio.Future[None]) -> None:
+        assert self._proxy_logs is not None
+        try:
+            while line := await self._proxy_logs.stdout.readline():
+                with contextlib.suppress(ValueError):
+                    event = json.loads(line)
+                    if event.get("ready"):
+                        if not ready.done():
+                            ready.set_result(None)
+                    elif self.on_network is not None:
+                        self.on_network(event)
+        finally:
+            if not ready.done():
+                ready.set_exception(SandboxUnavailable("the network proxy exited"))
 
     # --- processes ---------------------------------------------------------------------
 
@@ -187,6 +289,8 @@ class DockerBackend:
         # The image's PATH, not the host's; C.UTF-8 because the host's locale (e.g.
         # en_US.UTF-8) isn't installed in the image. The rest is the allowlisted env.
         container_env = {k: v for k, v in env.items() if k != "PATH"} | {"LANG": "C.UTF-8"}
+        if self.network is not None:
+            container_env |= proxy_env(f"http://{PROXY_ALIAS}:{PROXY_PORT}")
         env_args = [arg for k, v in container_env.items() for arg in ("-e", f"{k}={v}")]
         command = [
             "docker", "exec", *(["-i"] if stdin else []), "-w", str(cwd), *env_args,

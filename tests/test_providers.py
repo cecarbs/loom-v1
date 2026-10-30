@@ -281,3 +281,54 @@ async def test_openai_connection_error_names_server() -> None:
     [event] = await collect(provider, request())
     assert isinstance(event, pv.ProviderError) and event.kind == "other"
     assert "localhost:11434" in event.message
+
+
+@pytest.mark.parametrize(
+    ("secret", "hint"),
+    [("anthropic_api_key", "LOOM_SECRET_ANTHROPIC_API_KEY"), (None, "api_key_secret")],
+)
+async def test_anthropic_without_credentials(secret, hint, tmp_path, monkeypatch) -> None:
+    """No key from the store, the env or an SDK credentials profile: an auth error, not the
+    SDK's TypeError (which used to crash the TUI)."""
+    import os
+
+    for name in [n for n in os.environ if n.startswith("ANTHROPIC_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))  # no SDK credentials profile either
+    handler = Recorder(body=(FIXTURES / "anthropic_tool_use.sse").read_bytes())
+    provider = AnthropicProvider(
+        replace(SONNET, api_key_secret=secret), SecretStore({}), http_client=client(handler)
+    )
+    [event] = await collect(provider, request())
+    assert isinstance(event, pv.ProviderError) and event.kind == "auth"
+    assert event.message.startswith("no Anthropic API key") and hint in event.message
+    assert handler.requests == []
+
+
+async def test_missing_credentials_end_the_turn_with_an_error(tmp_path, monkeypatch) -> None:
+    import os
+
+    from loom.app import build_agent
+    from loom.config import LoomConfig
+    from loom.core import events as ev
+
+    for name in [n for n in os.environ if n.startswith("ANTHROPIC_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    handler = Recorder(body=b"")
+    provider = AnthropicProvider(SONNET, SecretStore({}), http_client=client(handler))
+    (tmp_path / "ws").mkdir()
+    bus = ev.EventBus()
+    seen: list[ev.AgentEvent] = []
+
+    async def record(event: ev.AgentEvent) -> None:
+        seen.append(event)
+
+    bus.subscribe(record)
+    agent = build_agent(
+        tmp_path / "ws", LoomConfig(), bus, provider=provider, home=tmp_path / "home"
+    )
+    await agent.run_turn("hi")  # returns instead of raising
+    errors = [r for r in agent.log.read() if r["kind"] == "error"]
+    assert len(errors) == 1 and "no Anthropic API key" in str(errors[0])
+    assert any(isinstance(e, ev.ErrorEvent) for e in seen)

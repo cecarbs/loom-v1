@@ -416,3 +416,21 @@ async def test_undo_command_asks_which_checkpoint(tmp_path: Path) -> None:
     assert not (app.workspace / "f.txt").exists()
     assert "not kernel variables" in out.getvalue()
     await app.aclose()
+
+
+def test_log_listeners_get_redacted_records_and_cannot_break_logging(tmp_path) -> None:
+    from loom.broker.redact import Redactor
+    from loom.session.store import SessionLog
+
+    redactor = Redactor()
+    redactor.add("hunter2")
+    log = SessionLog(tmp_path / "session.jsonl", redactor)
+    seen: list[dict] = []
+
+    def broken(record: dict) -> None:
+        raise RuntimeError("exporter bug")
+
+    log.listeners += [broken, seen.append]
+    log.append("note", text="password hunter2")
+    assert [r["text"] for r in seen] == [log.read()[0]["text"]]
+    assert "hunter2" not in seen[0]["text"]
